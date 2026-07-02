@@ -51347,6 +51347,177 @@ def main(holder: Holder) -> None:
 
 	tauon.gallery_render = render_gallery  # exposed for the Custom Layout Album Gallery widget
 
+	def update_tracklist_scrollbar_lock(hitbox) -> bool:
+		"""The tracklist scroll bar's interaction lock (moved verbatim from the
+		input phase of the main loop): while the pointer is in the bar's hitbox
+		and pressed, the bar owns interaction — unless the pointer is over an
+		album-rating star (gui.album_rating_hover), in which case the bar
+		yields. Updates gui.scrollbar_interaction_lock and gui.scrollbar_active
+		(read by the playlist body input, e.g. to disable rating input while
+		scrolling); returns the suppressed-by-album-rating flag. Shared with
+		the Custom Layout Tracklist widget, which passes its segment's hitbox.
+		"""
+		scrollbar_pointer_in_area = tauon.coll(hitbox)
+		if not scrollbar_pointer_in_area:
+			gui.scrollbar_interaction_lock = False
+		elif (
+			not gui.album_rating_hover
+			and (
+				inp.mouse_click
+				or inp.right_click
+				or (inp.mouse_down and coll_point(inp.click_location, hitbox))
+			)
+		):
+			gui.scrollbar_interaction_lock = True
+		gui.scrollbar_active = scroll_hold or gui.scrollbar_interaction_lock
+		return (
+			gui.album_rating_hover
+			and not scroll_hold
+			and not gui.scrollbar_interaction_lock
+		)
+
+	tauon.tracklist_scrollbar_lock = update_tracklist_scrollbar_lock  # for the Tracklist widget
+
+	def render_tracklist_scrollbar(left, plw, top, bottom, ey) -> None:
+		"""The tracklist scroll bar: auto-hide (shows on hover / while
+		scrolling), thumb drag, continuous click-slide above/below the thumb,
+		right-click jump, and the album-rating suppression. Moved verbatim from
+		the main loop with the geometry parameterized: left/plw = tracklist
+		left edge/width, top/bottom = the bar's vertical span, ey = the thumb
+		travel limit (the preset passes its historical window-based value).
+		The Custom Layout Tracklist widget calls this with segment geometry.
+		Thumb state (scroll_hold etc.) is the shared main-loop state — only one
+		tracklist bar exists at a time (preset and widget never run together).
+		"""
+		nonlocal scroll_hold, scroll_point, scroll_bpoint, sbp, sbl
+		width = 15 * gui.scale
+
+		if gui.set_mode and prefs.left_align_album_artist_title:
+			width = 11 * gui.scale
+		x = left + plw - width - 2 * gui.scale
+		scroll_hitbox_width = 28 * gui.scale
+		scroll_hitbox_right = x + width + 1 * gui.scale
+		scroll_hitbox_x = scroll_hitbox_right - scroll_hitbox_width
+
+		gui.scroll_hide_box = (
+			scroll_hitbox_x,
+			top,
+			scroll_hitbox_width,
+			bottom - top,
+		)
+
+		scrollbar_hidden_by_album_rating = (
+			gui.album_rating_hover
+			and not scroll_hold
+			and not gui.scrollbar_interaction_lock
+		)
+		if not scrollbar_hidden_by_album_rating:
+			tauon.fields.add(gui.scroll_hide_box)
+		if not scrollbar_hidden_by_album_rating and not prefs.show_nag and (
+			tauon.scroll_hide_timer.get() < 0.9 or (
+				(tauon.coll(gui.scroll_hide_box) or scroll_hold or gui.quick_search_mode)
+				and not menu_is_open()
+				and not pref_box.enabled
+				and not gui.rename_playlist_box
+				and gui.layer_focus == 0
+				and gui.show_playlist
+				and not tauon.search_over.active
+			)
+		):
+			scroll_opacity = 255
+
+			if not gui.combo_mode:
+				if len(pctl.default_playlist) < 50:
+					sbl = 85 * gui.scale
+					if len(pctl.default_playlist) == 0:
+						sbp = top
+				else:
+					sbl = 105 * gui.scale
+
+				tauon.fields.add((scroll_hitbox_x, sbp, scroll_hitbox_width, sbl))
+				if (
+					tauon.coll((scroll_hitbox_x, top, scroll_hitbox_width, ey - top))
+					and (inp.mouse_down or inp.right_click)
+					and coll_point(inp.click_location, (scroll_hitbox_x, top, scroll_hitbox_width, ey - top))
+				):
+					gui.pl_update = 1
+					if inp.right_click:
+						sbp = inp.mouse_position[1] - int(sbl / 2)
+						if sbp + sbl > ey:
+							sbp = ey - sbl
+						elif sbp < top:
+							sbp = top
+						per = (sbp - top) / (ey - top - sbl)
+						pctl.playlist_view_position = int(len(pctl.default_playlist) * per)
+						gui.playlist_scroll_pixels = 0
+						logging.debug("Position set by scroll bar (right click)")
+						pctl.playlist_view_position = max(pctl.playlist_view_position, 0)
+
+					elif inp.mouse_click:
+						if inp.mouse_position[1] < sbp:
+							gui.scroll_direction = -1
+						elif inp.mouse_position[1] > sbp + sbl:
+							gui.scroll_direction = 1
+						else:
+							tauon.input_sdl.mouse_capture_want = True
+
+							scroll_hold = True
+							scroll_point = inp.mouse_position[1]
+							scroll_bpoint = sbp
+					else:
+						if sbp < inp.mouse_position[1] < sbp + sbl:
+							gui.scroll_direction = 0
+						pctl.playlist_view_position += gui.scroll_direction * 2
+						gui.playlist_scroll_pixels = 0
+						logging.debug("Position set by scroll bar (slide)")
+						pctl.playlist_view_position = max(pctl.playlist_view_position, 0)
+						pctl.playlist_view_position = min(
+							pctl.playlist_view_position, len(pctl.default_playlist)
+						)
+
+						if sbp + sbl > ey:
+							sbp = ey - sbl
+						elif sbp < top:
+							sbp = top
+
+				if not inp.mouse_down:
+					scroll_hold = False
+
+				if scroll_hold and not inp.mouse_click:
+					gui.pl_update = 1
+					tauon.input_sdl.mouse_capture_want = True
+
+					sbp = inp.mouse_position[1] - (scroll_point - scroll_bpoint)
+					if sbp + sbl > ey:
+						sbp = ey - sbl
+					elif sbp < top:
+						sbp = top
+					per = (sbp - top) / (ey - top - sbl)
+					pctl.playlist_view_position = int(len(pctl.default_playlist) * per)
+					gui.playlist_scroll_pixels = 0
+					logging.debug("Position set by scroll bar (drag)")
+
+				elif len(pctl.default_playlist) > 0:
+					per = (pctl.playlist_view_position + (gui.playlist_scroll_pixels / max(gui.playlist_row_height, 1))) / len(pctl.default_playlist)
+					sbp = int((ey - top - sbl) * per) + top + 1
+
+				bg = ColourRGBA(255, 255, 255, 6)
+				fg = colours.scroll_colour
+
+				if colours.lm:
+					bg = ColourRGBA(200, 200, 200, 100)
+					fg = ColourRGBA(100, 100, 100, 200)
+
+				ddt.rect_a((x, top), (width + 1 * gui.scale, bottom - top), bg)
+				ddt.rect_a((x + 1, sbp), (width, sbl), alpha_mod(fg, scroll_opacity))
+
+				if (
+					tauon.coll((scroll_hitbox_x, sbp, scroll_hitbox_width, sbl)) and inp.mouse_position[0] != 0
+				) or scroll_hold:
+					ddt.rect_a((x + 1 * gui.scale, sbp), (width, sbl), ColourRGBA(255, 255, 255, 19))
+
+	tauon.tracklist_scrollbar_render = render_tracklist_scrollbar  # for the Tracklist widget
+
 	render_heartbeat_timer = Timer()
 
 	tauon.set_tray_icons()
@@ -53144,24 +53315,7 @@ def main(holder: Holder) -> None:
 					or tauon.tree_view_scroll.held
 					or tauon.radio_view_scroll.held
 				)
-				scrollbar_pointer_in_area = tauon.coll(tracklist_scroll_hitbox)
-				if not scrollbar_pointer_in_area:
-					gui.scrollbar_interaction_lock = False
-				elif (
-					not gui.album_rating_hover
-					and (
-						inp.mouse_click
-						or inp.right_click
-						or (inp.mouse_down and coll_point(inp.click_location, tracklist_scroll_hitbox))
-					)
-				):
-					gui.scrollbar_interaction_lock = True
-				gui.scrollbar_active = scroll_hold or gui.scrollbar_interaction_lock
-				scroll_bar_suppressed_by_album_rating = (
-					gui.album_rating_hover
-					and not scroll_hold
-					and not gui.scrollbar_interaction_lock
-				)
+				scroll_bar_suppressed_by_album_rating = update_tracklist_scrollbar_lock(tracklist_scroll_hitbox)
 				scroll_bar_blocks_side_drag = (
 					scroll_bar_held
 					or (tauon.coll(tracklist_scroll_hitbox) and not scroll_bar_suppressed_by_album_rating)
@@ -54134,155 +54288,11 @@ def main(holder: Holder) -> None:
 					edge_top += gui.set_height
 				tauon.edge_playlist2.render(gui.playlist_left, edge_top, gui.plw, 25 * gui.scale)
 
-				width = 15 * gui.scale
-
-				if gui.set_mode and prefs.left_align_album_artist_title:
-					width = 11 * gui.scale
-				x = gui.playlist_left + gui.plw - width - 2 * gui.scale
-				scroll_hitbox_width = 28 * gui.scale
-				scroll_hitbox_right = x + width + 1 * gui.scale
-				scroll_hitbox_x = scroll_hitbox_right - scroll_hitbox_width
-
-				# x = gui.plw
-				# width = round(14 * gui.scale)
-				# if gui.lsp:
-				#     x += gui.lspw
-				# x -= width
-
-				gui.scroll_hide_box = (
-					scroll_hitbox_x,
-					top,
-					scroll_hitbox_width,
-					window_size[1] - gui.panelBY - top,
-				)
-
-				scrollbar_hidden_by_album_rating = (
-					gui.album_rating_hover
-					and not scroll_hold
-					and not gui.scrollbar_interaction_lock
-				)
-				if not scrollbar_hidden_by_album_rating:
-					tauon.fields.add(gui.scroll_hide_box)
-				if not scrollbar_hidden_by_album_rating and not prefs.show_nag and (
-					tauon.scroll_hide_timer.get() < 0.9 or (
-						(tauon.coll(gui.scroll_hide_box) or scroll_hold or gui.quick_search_mode)
-						and not menu_is_open()
-						and not pref_box.enabled
-						and not gui.rename_playlist_box
-						and gui.layer_focus == 0
-						and gui.show_playlist
-						and not tauon.search_over.active
-					)
-				):
-					scroll_opacity = 255
-
-					if not gui.combo_mode:
-						sy = 31 * gui.scale
-						ey = window_size[1] - (30 + 22) * gui.scale
-
-						if len(pctl.default_playlist) < 50:
-							sbl = 85 * gui.scale
-							if len(pctl.default_playlist) == 0:
-								sbp = top
-						else:
-							sbl = 105 * gui.scale
-
-						tauon.fields.add((scroll_hitbox_x, sbp, scroll_hitbox_width, sbl))
-						if (
-							tauon.coll((scroll_hitbox_x, top, scroll_hitbox_width, ey - top))
-							and (inp.mouse_down or inp.right_click)
-							and coll_point(inp.click_location, (scroll_hitbox_x, top, scroll_hitbox_width, ey - top))
-						):
-							gui.pl_update = 1
-							if inp.right_click:
-								sbp = inp.mouse_position[1] - int(sbl / 2)
-								if sbp + sbl > ey:
-									sbp = ey - sbl
-								elif sbp < top:
-									sbp = top
-								per = (sbp - top) / (ey - top - sbl)
-								pctl.playlist_view_position = int(len(pctl.default_playlist) * per)
-								gui.playlist_scroll_pixels = 0
-								logging.debug("Position set by scroll bar (right click)")
-								pctl.playlist_view_position = max(pctl.playlist_view_position, 0)
-
-								# if playlist_position == len(pctl.default_playlist):
-								#     logging.info("END")
-
-							# elif inp.mouse_position[1] < sbp:
-							#     pctl.playlist_view_position -= 2
-							# elif inp.mouse_position[1] > sbp + sbl:
-							#     pctl.playlist_view_position += 2
-							elif inp.mouse_click:
-								if inp.mouse_position[1] < sbp:
-									gui.scroll_direction = -1
-								elif inp.mouse_position[1] > sbp + sbl:
-									gui.scroll_direction = 1
-								else:
-									# p_y = pointer(c_int(0))
-									# p_x = pointer(c_int(0))
-									# sdl3.SDL_GetGlobalMouseState(p_x, p_y)
-									tauon.input_sdl.mouse_capture_want = True
-
-									scroll_hold = True
-									# scroll_point = p_y.contents.value  # inp.mouse_position[1]
-									scroll_point = inp.mouse_position[1]
-									scroll_bpoint = sbp
-							else:
-								# gui.update += 1
-								if sbp < inp.mouse_position[1] < sbp + sbl:
-									gui.scroll_direction = 0
-								pctl.playlist_view_position += gui.scroll_direction * 2
-								gui.playlist_scroll_pixels = 0
-								logging.debug("Position set by scroll bar (slide)")
-								pctl.playlist_view_position = max(pctl.playlist_view_position, 0)
-								pctl.playlist_view_position = min(
-									pctl.playlist_view_position, len(pctl.default_playlist)
-								)
-
-								if sbp + sbl > ey:
-									sbp = ey - sbl
-								elif sbp < top:
-									sbp = top
-
-						if not inp.mouse_down:
-							scroll_hold = False
-
-						if scroll_hold and not inp.mouse_click:
-							gui.pl_update = 1
-							# p_y = pointer(c_int(0))
-							# p_x = pointer(c_int(0))
-							# sdl3.SDL_GetGlobalMouseState(p_x, p_y)
-							tauon.input_sdl.mouse_capture_want = True
-
-							sbp = inp.mouse_position[1] - (scroll_point - scroll_bpoint)
-							if sbp + sbl > ey:
-								sbp = ey - sbl
-							elif sbp < top:
-								sbp = top
-							per = (sbp - top) / (ey - top - sbl)
-							pctl.playlist_view_position = int(len(pctl.default_playlist) * per)
-							gui.playlist_scroll_pixels = 0
-							logging.debug("Position set by scroll bar (drag)")
-
-						elif len(pctl.default_playlist) > 0:
-							per = (pctl.playlist_view_position + (gui.playlist_scroll_pixels / max(gui.playlist_row_height, 1))) / len(pctl.default_playlist)
-							sbp = int((ey - top - sbl) * per) + top + 1
-
-						bg = ColourRGBA(255, 255, 255, 6)
-						fg = colours.scroll_colour
-
-						if colours.lm:
-							bg = ColourRGBA(200, 200, 200, 100)
-							fg = ColourRGBA(100, 100, 100, 200)
-
-						ddt.rect_a((x, top), (width + 1 * gui.scale, window_size[1] - top - gui.panelBY), bg)
-						ddt.rect_a((x + 1, sbp), (width, sbl), alpha_mod(fg, scroll_opacity))
-
-						if (
-							tauon.coll((scroll_hitbox_x, sbp, scroll_hitbox_width, sbl)) and inp.mouse_position[0] != 0
-						) or scroll_hold:
-							ddt.rect_a((x + 1 * gui.scale, sbp), (width, sbl), ColourRGBA(255, 255, 255, 19))
+				if not gui.custom_mode:
+					render_tracklist_scrollbar(
+						gui.playlist_left, gui.plw, top,
+						window_size[1] - gui.panelBY,
+						window_size[1] - (30 + 22) * gui.scale)
 
 				# NEW TOP BAR
 				# C-TBR

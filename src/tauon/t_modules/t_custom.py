@@ -690,91 +690,6 @@ class TracklistWidget(Widget):
 
 	def __init__(self) -> None:
 		self._last_rect: tuple | None = None
-		# Scroll bar drag state: whether the thumb is held, and the pointer's
-		# offset within the thumb when it was grabbed.
-		self._sb_hold = False
-		self._sb_grab = 0.0
-
-	def _sb_geometry(self, tauon: Tauon, rect: tuple) -> dict | None:
-		"""Scroll bar geometry for the segment, or None when the playlist fits
-		(no bar). Same style as the standard tracklist bar: a full-height track
-		at the right edge with a fixed-length thumb."""
-		gui = tauon.gui
-		scale = gui.scale
-		x, y, w, h = rect
-		total = len(tauon.pctl.default_playlist)
-		if total == 0 or total * max(gui.playlist_row_height, 1) <= h:
-			return None
-		width = round(15 * scale)
-		sx = x + w - width - round(2 * scale)
-		top = y
-		ey = y + h
-		sbl = round((85 if total < 50 else 105) * scale)
-		if ey - top <= sbl:
-			return None
-		per = (tauon.pctl.playlist_view_position
-			+ (gui.playlist_scroll_pixels / max(gui.playlist_row_height, 1))) / total
-		sbp = top + (ey - top - sbl) * min(max(per, 0.0), 1.0)
-		sbp = min(max(sbp, top), ey - sbl)
-		hitbox = (sx - round(6 * scale), top, width + round(8 * scale), h)
-		return {"sx": sx, "width": width, "top": top, "ey": ey, "sbp": sbp,
-			"sbl": sbl, "hitbox": hitbox, "total": total}
-
-	def _scrollbar_input(self, tauon: Tauon, g: dict | None) -> bool:
-		"""Handle press/drag on the scroll bar. Returns True while the bar owns
-		the pointer (press landed on it or a drag is live), so the body render
-		can be shielded from those events."""
-		gui = tauon.gui
-		inp = tauon.inp
-		if g is None or gui.custom_edit:
-			self._sb_hold = False
-			return False
-		mx, my = inp.mouse_position[0], inp.mouse_position[1]
-		hx, hy, hw, hh = g["hitbox"]
-		over_bar = hx <= mx < hx + hw and hy <= my < hy + hh
-		if inp.mouse_click and over_bar:
-			if g["sbp"] <= my < g["sbp"] + g["sbl"]:
-				self._sb_grab = my - g["sbp"]  # grab the thumb where pressed
-			else:
-				self._sb_grab = g["sbl"] / 2   # jump: centre the thumb on the pointer
-			self._sb_hold = True
-		if self._sb_hold:
-			if not inp.mouse_down:
-				self._sb_hold = False
-			else:
-				# Keep receiving motion while the pointer leaves the window,
-				# like the standard bar.
-				tauon.input_sdl.mouse_capture_want = True
-				sbp = min(max(my - self._sb_grab, g["top"]), g["ey"] - g["sbl"])
-				per = (sbp - g["top"]) / (g["ey"] - g["top"] - g["sbl"])
-				tauon.pctl.playlist_view_position = min(max(int(g["total"] * per), 0), g["total"])
-				gui.playlist_scroll_pixels = 0
-				gui.pl_update = 1
-				g["sbp"] = sbp
-		return self._sb_hold or over_bar
-
-	def _draw_scrollbar(self, tauon: Tauon, g: dict | None) -> None:
-		if g is None:
-			return
-		gui = tauon.gui
-		ddt = tauon.ddt
-		colours = tauon.colours
-		bg = ColourRGBA(255, 255, 255, 6)
-		fg = colours.scroll_colour
-		if colours.lm:
-			bg = ColourRGBA(200, 200, 200, 100)
-			fg = ColourRGBA(100, 100, 100, 200)
-		# Hover repaint fields for the bar and the thumb within it.
-		tauon.fields.add(g["hitbox"])
-		tauon.fields.add((g["hitbox"][0], g["sbp"], g["hitbox"][2], g["sbl"]))
-		ddt.rect_a((g["sx"], g["top"]), (g["width"] + round(1 * gui.scale), g["ey"] - g["top"]), bg)
-		ddt.rect_a((g["sx"] + 1, g["sbp"]), (g["width"], g["sbl"]), fg)
-		hx, hy, hw, _hh = g["hitbox"]
-		mx, my = tauon.inp.mouse_position[0], tauon.inp.mouse_position[1]
-		over_thumb = hx <= mx < hx + hw and g["sbp"] <= my < g["sbp"] + g["sbl"]
-		if self._sb_hold or over_thumb:
-			ddt.rect_a((g["sx"] + round(1 * gui.scale), g["sbp"]), (g["width"], g["sbl"]),
-				ColourRGBA(255, 255, 255, 19))
 
 	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
 		pr = tauon.playlist_render
@@ -787,31 +702,36 @@ class TracklistWidget(Widget):
 		mx, my = inp.mouse_position[0], inp.mouse_position[1]
 		over = rect[0] <= mx < rect[0] + rect[2] and rect[1] <= my < rect[1] + rect[3]
 		interacting = over or inp.mouse_click or inp.right_click or inp.mouse_down or inp.mouse_wheel != 0
-		# Scroll bar input runs before the body render (it may set pl_update);
-		# while the bar owns the pointer, hide the mouse from the body so a
-		# thumb drag doesn't also select/hover rows underneath.
-		g = self._sb_geometry(tauon, rect)
-		sb_engaged = self._scrollbar_input(tauon, g)
-		saved_pos = (inp.mouse_position[0], inp.mouse_position[1])
-		if sb_engaged:
-			inp.mouse_position[0] = -99999
-			inp.mouse_position[1] = -99999
-		try:
-			if gui.pl_update > 0 or rect != self._last_rect or interacting:
-				# Mirror the standard path: heart_fields is repopulated by full_render,
-				# so it must be cleared first or it grows unbounded every frame (the
-				# normal loop clears it before its full_render; that path is skipped in
-				# custom mode).
-				gui.heart_fields.clear()
-				pr.full_render(rect=rect)
-				self._last_rect = rect
-				gui.pl_update = 0
-			else:
-				pr.cache_render()
-		finally:
-			if sb_engaged:
-				inp.mouse_position[0], inp.mouse_position[1] = saved_pos
-		self._draw_scrollbar(tauon, g)
+		view = not gui.custom_edit
+		if view:
+			# The standard scroll bar's interaction lock, pointed at this
+			# segment's bar hitbox (same formula as the shared render function:
+			# the hitbox's right edge is 1px scale inside the tracklist right
+			# edge). It updates gui.scrollbar_active, which the body render
+			# reads, so the bar and the album-rating stars yield to each other
+			# exactly like the preset tracklist.
+			scale = gui.scale
+			hitbox = (rect[0] + rect[2] - 1 * scale - 28 * scale, rect[1], 28 * scale, rect[3])
+			tauon.tracklist_scrollbar_lock(hitbox)
+		if gui.pl_update > 0 or rect != self._last_rect or interacting:
+			# Mirror the standard path: heart_fields is repopulated by full_render,
+			# so it must be cleared first or it grows unbounded every frame (the
+			# normal loop clears it before its full_render; that path is skipped in
+			# custom mode).
+			gui.heart_fields.clear()
+			pr.full_render(rect=rect)
+			self._last_rect = rect
+			gui.pl_update = 0
+		else:
+			pr.cache_render()
+		if view:
+			# The standard scroll bar itself (auto-hide until hovered, thumb
+			# drag, continuous click-slide, right-click jump, album-rating
+			# suppression), pointed at the segment. Drawn after the body so it
+			# sits on top, same as the preset frame order.
+			tauon.tracklist_scrollbar_render(
+				rect[0], rect[2], rect[1], rect[1] + rect[3],
+				rect[1] + rect[3] - 22 * gui.scale)
 
 
 class DetailsWidget(Widget):
@@ -1433,7 +1353,7 @@ GUTTER_OPTIONS = [0, 2, 3, 4, 8, 9, 16]
 # dragging. One constant so the drag hit-test, the hover fields and the resize
 # cursor stay aligned — a mismatch makes the cursor stick or show where a drag
 # can't start.
-BOUNDARY_GRAB = 9
+BOUNDARY_GRAB = 5
 # Defaults applied to a segment when a widget is first added to it (Add menu
 # and template leaves). Replacing an existing widget keeps the segment's
 # configured gutter/border.
