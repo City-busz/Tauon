@@ -26,8 +26,10 @@ Implemented here:
 from __future__ import annotations
 
 import builtins
+import ctypes
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Callable
 
 import sdl3
@@ -254,6 +256,251 @@ class SticksVisWidget(Widget):
 			tauon.showcase.render_vis()
 		else:
 			gui.draw_vis4_top = True
+
+
+# Spectrogram colour presets: (name, gradient stops as (position, (r, g, b))).
+# The right-click menu in t_main is built from this list; the selected index is
+# prefs.spectrogram_colour.
+SPECTRO_PRESETS: list[tuple[str, list[tuple[float, tuple[int, int, int]]]]] = [
+	("Inferno", [
+		(0.0, (0, 0, 4)), (0.22, (60, 10, 90)), (0.45, (150, 40, 90)),
+		(0.7, (230, 100, 30)), (0.9, (250, 200, 60)), (1.0, (255, 250, 200))]),
+	("Ocean", [
+		(0.0, (3, 5, 12)), (0.35, (10, 45, 90)), (0.65, (20, 120, 180)),
+		(0.85, (90, 210, 230)), (1.0, (235, 255, 255))]),
+	("Aurora", [
+		(0.0, (5, 8, 10)), (0.3, (12, 55, 45)), (0.6, (25, 150, 85)),
+		(0.85, (150, 230, 120)), (1.0, (245, 255, 220))]),
+	("Violet", [
+		(0.0, (8, 4, 16)), (0.4, (70, 25, 130)), (0.7, (170, 70, 200)),
+		(1.0, (255, 235, 255))]),
+	("Greyscale", [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]),
+]
+
+
+def build_spectro_lut(preset: int) -> list[bytes]:
+	"""256-entry magnitude -> pixel LUT for the given preset, as 4-byte
+	ARGB8888 pixels (B, G, R, A byte order, little-endian)."""
+	stops = SPECTRO_PRESETS[preset % len(SPECTRO_PRESETS)][1]
+	lut = []
+	for i in range(256):
+		p = i / 255
+		r = g = b = 0
+		for j in range(len(stops) - 1):
+			p0, c0 = stops[j]
+			p1, c1 = stops[j + 1]
+			if p <= p1 or j == len(stops) - 2:
+				t = 0.0 if p1 <= p0 else min(1.0, max(0.0, (p - p0) / (p1 - p0)))
+				r = round(c0[0] + (c1[0] - c0[0]) * t)
+				g = round(c0[1] + (c1[1] - c0[1]) * t)
+				b = round(c0[2] + (c1[2] - c0[2]) * t)
+				break
+		lut.append(bytes((b, g, r, 255)))
+	return lut
+
+
+class SpectrogramWidget(Widget):
+	"""Scrolling spectrogram, built for the custom layout (the legacy top-panel
+	spec2 one is preset-only and unfed on PHAZOR). Data: the PHAZOR vis thread
+	feeds raw log-spaced spectrum columns (gui.spectrogram_bins tall) through
+	gui.spectrogram_buffers while gui.vis == 6 (mode switched by
+	update_layout_do via gui.spectrogram_in_widget).
+
+	Rendering: a ring texture of one column per sample, sized to the widget
+	(just enough columns to span its width; recreated — newest history carried
+	over — when the segment size settles after a change, never mid-drag). Each
+	new column is one tiny SDL_UpdateTexture write, and the visible window is
+	at most two scaled blits per frame. Float (subpixel) dest rects + a
+	fractional offset from the measured column cadence give a continuous
+	scroll instead of a per-column step; linear filtering smooths both axes.
+	The newest column slides in from the right edge. Magnitude values (0-255)
+	are kept in a ring alongside the pixels so switching colour preset
+	recolourises the whole history (per-byte plane translate, C speed). State
+	is class-level: the widget is single-instance and this way the texture and
+	history survive add/remove and layout reloads without SDL lifetime
+	management on GC.
+	"""
+
+	kind = "vis_spectrogram"
+	name = "Visualiser: Spectrogram"
+	min_w = 60
+	min_h = 40
+	single_instance = True
+	offscreen = False  # draws with the renderer directly at screen coords
+
+	NORM = 30.0   # get_spectrum_hires sqrt-magnitude that maps to full scale
+	              # (4096 window: magnitudes x2 vs get_spectrum, sqrt -> x1.41)
+	GAMMA = 0.5
+	RESIZE_SETTLE = 0.3  # s the requested size must hold before rebuilding
+
+	_tex = None
+	_tex_bins = 0
+	_cols = 0                        # ring length (texture width), widget-sized
+	_vals: bytearray | None = None   # row-major magnitudes, mirrors the texture
+	_write = 0
+	_filled = 0
+	_lut: list[bytes] | None = None
+	_lut_preset = -1
+	_last_col = 0.0
+	_interval = 1 / 45   # EMA of column arrival interval
+	_pending_cols = 0
+	_pending_since = 0.0
+
+	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
+		gui = tauon.gui
+		cls = SpectrogramWidget
+		rect = (round(x), round(y), round(w), round(h))
+		tauon.fields.add(rect)
+
+		if tauon.prefs.backend != Backend.PHAZOR:
+			tauon.ddt.text_background_colour = ColourRGBA(8, 8, 8, 255)
+			tauon.ddt.text(
+				(rect[0] + rect[2] // 2, rect[1] + rect[3] // 2 - round(8 * gui.scale), 2),
+				_t("Visualiser requires the Phazor backend"), ColourRGBA(110, 110, 110, 255), 212,
+				max_w=rect[2] - round(8 * gui.scale))
+			return
+
+		bins = gui.spectrogram_bins
+		self._ensure(tauon, bins, w)
+
+		while gui.spectrogram_buffers:
+			self._push_column(gui.spectrogram_buffers.pop(0), bins)
+
+		# Background in the palette's floor colour, so sparse history blends in.
+		lut0 = cls._lut[0]
+		tauon.ddt.rect(rect, ColourRGBA(lut0[2], lut0[1], lut0[0], 255))
+
+		if cls._filled:
+			col_px = 1.5 * gui.scale
+			frac = min((time.monotonic() - cls._last_col) / max(cls._interval, 0.001), 1.0)
+			offset = frac * col_px
+			visible = min(cls._filled, int(w / col_px) + 2)
+			newest = (cls._write - 1) % cls._cols
+			start = (newest - visible + 1) % cls._cols
+			if start + visible <= cls._cols:
+				runs = [(start, visible)]
+			else:
+				runs = [(start, cls._cols - start), (0, visible - (cls._cols - start))]
+
+			clip = sdl3.SDL_Rect(rect[0], rect[1], rect[2], rect[3])
+			sdl3.SDL_SetRenderClipRect(tauon.renderer, ctypes.byref(clip))
+			# The newest column's left edge sits at (right - offset): it is
+			# revealed from the right edge as time passes, then the next column
+			# lands exactly where it left off — constant leftward velocity.
+			dx = x + w - offset - (visible - 1) * col_px
+			for s, n in runs:
+				src = sdl3.SDL_FRect(s, 0, n, bins)
+				dst = sdl3.SDL_FRect(dx, y, n * col_px, h)
+				sdl3.SDL_RenderTexture(tauon.renderer, cls._tex, ctypes.byref(src), ctypes.byref(dst))
+				dx += n * col_px
+			sdl3.SDL_SetRenderClipRect(tauon.renderer, None)
+
+		if tauon.coll(rect) and tauon.inp.right_click and tauon.is_level_zero(False):
+			tauon.spectrogram_menu.activate()
+			tauon.inp.right_click = False
+
+		if gui.vis == 6 and tauon.pctl.playing_state in (PlayingState.PLAYING, PlayingState.URL_STREAM):
+			gui.delay_frame(0.016)  # keep frames coming for the smooth scroll
+
+	def _ensure(self, tauon: Tauon, bins: int, w: float) -> None:
+		cls = SpectrogramWidget
+		# Ring length = just enough columns to span the widget's width.
+		want = max(16, int(w / (1.5 * tauon.gui.scale)) + 3)
+		if cls._tex is None or cls._tex_bins != bins:
+			self._rebuild(tauon, bins, want)
+		elif want != cls._cols:
+			# The widget is being resized. Never rebuild mid-drag (edit-mode
+			# segment drags deliver a new size every frame); otherwise wait for
+			# the requested size to hold briefly (live window resizes stream
+			# sizes too), then rebuild, carrying the newest history over.
+			cm = tauon.custom
+			dragging = cm.drag is not None or cm.widget_drag is not None
+			now = time.monotonic()
+			if dragging:
+				cls._pending_cols = 0
+			elif want != cls._pending_cols:
+				cls._pending_cols = want
+				cls._pending_since = now
+			elif now - cls._pending_since >= cls.RESIZE_SETTLE:
+				self._rebuild(tauon, bins, want)
+		else:
+			cls._pending_cols = 0
+		if cls._lut_preset != tauon.prefs.spectrogram_colour:
+			cls._lut_preset = tauon.prefs.spectrogram_colour
+			cls._lut = build_spectro_lut(cls._lut_preset)
+			self._recolour(bins)
+
+	def _rebuild(self, tauon: Tauon, bins: int, cols: int) -> None:
+		"""Destroy and recreate the ring texture at ``cols`` columns, carrying
+		over the newest min(filled, cols) columns of history."""
+		cls = SpectrogramWidget
+		old_vals, old_cols, old_write, old_filled = cls._vals, cls._cols, cls._write, cls._filled
+		old_bins = cls._tex_bins
+		if cls._tex is not None:
+			sdl3.SDL_DestroyTexture(cls._tex)
+		cls._tex = sdl3.SDL_CreateTexture(
+			tauon.renderer, sdl3.SDL_PIXELFORMAT_ARGB8888,
+			sdl3.SDL_TEXTUREACCESS_STREAMING, cols, bins)
+		sdl3.SDL_SetTextureScaleMode(cls._tex, sdl3.SDL_SCALEMODE_LINEAR)
+		sdl3.SDL_SetTextureBlendMode(cls._tex, sdl3.SDL_BLENDMODE_NONE)
+		cls._cols = cols
+		cls._tex_bins = bins
+		cls._vals = bytearray(cols * bins)
+		keep = 0
+		if old_vals is not None and old_filled and old_cols and old_bins == bins:
+			# Copy the newest columns, oldest-first, to the start of the new
+			# ring — per-row slice copies over the (max two) old-ring runs.
+			keep = min(old_filled, cols)
+			start = (old_write - keep) % old_cols
+			if start + keep <= old_cols:
+				runs = [(start, keep)]
+			else:
+				runs = [(start, old_cols - start), (0, keep - (old_cols - start))]
+			dst = 0
+			for s, n in runs:
+				for row in range(bins):
+					cls._vals[row * cols + dst:row * cols + dst + n] = \
+						old_vals[row * old_cols + s:row * old_cols + s + n]
+				dst += n
+		cls._write = keep % cols
+		cls._filled = keep
+		cls._pending_cols = 0
+		cls._lut_preset = -1  # force a LUT refresh + full texture upload
+
+	def _push_column(self, col: list[float], bins: int) -> None:
+		cls = SpectrogramWidget
+		vals = cls._vals
+		lut = cls._lut
+		write = cls._write
+		norm = cls.NORM
+		gamma = cls.GAMMA
+		pix = bytearray(bins * 4)
+		for i in range(min(bins, len(col))):
+			v = col[i] / norm
+			idx = 255 if v >= 1.0 else int((v ** gamma) * 255) if v > 0 else 0
+			row = bins - 1 - i  # low frequencies at the bottom
+			vals[row * cls._cols + write] = idx
+			pix[row * 4:row * 4 + 4] = lut[idx]
+		rect = sdl3.SDL_Rect(write, 0, 1, bins)
+		sdl3.SDL_UpdateTexture(cls._tex, ctypes.byref(rect), bytes(pix), 4)
+		cls._write = (write + 1) % cls._cols
+		cls._filled = min(cls._filled + 1, cls._cols)
+		now = time.monotonic()
+		dt = now - cls._last_col
+		if 0.004 < dt < 0.5:
+			cls._interval += (dt - cls._interval) * 0.2
+		cls._last_col = now
+
+	def _recolour(self, bins: int) -> None:
+		"""Rewrite the whole texture from the magnitude ring with the current
+		LUT — one byte-translate per colour plane, then a single upload."""
+		cls = SpectrogramWidget
+		vals = bytes(cls._vals)
+		out = bytearray(len(vals) * 4)
+		for plane in range(4):
+			table = bytes(cls._lut[i][plane] for i in range(256))
+			out[plane::4] = vals.translate(table)
+		sdl3.SDL_UpdateTexture(cls._tex, None, bytes(out), cls._cols * 4)
 
 
 class TopPanelWidget(Widget):
@@ -734,6 +981,10 @@ def _vis_sticks(spec: WidgetSpec) -> Widget:
 	return SticksVisWidget()
 
 
+def _vis_spectrogram(spec: WidgetSpec) -> Widget:
+	return SpectrogramWidget()
+
+
 # Registry — the Add menu and (de)serialization are driven by this table. The
 # lock / single-instance defaults follow the agreed widget table.
 WIDGET_SPECS: list[WidgetSpec] = [
@@ -760,6 +1011,8 @@ WIDGET_SPECS: list[WidgetSpec] = [
 		single_instance=True, colour=ColourRGBA(18, 18, 28, 255)),
 	WidgetSpec("vis_sticks", "Visualiser: Sticks", "Visualizers", _vis_sticks,
 		single_instance=True, colour=ColourRGBA(16, 16, 22, 255)),
+	WidgetSpec("vis_spectrogram", "Visualiser: Spectrogram", "Visualizers", _vis_spectrogram,
+		single_instance=True, colour=ColourRGBA(12, 12, 16, 255)),
 	WidgetSpec("playback_panel", "Playback Panel", "Panels", _playback_panel,
 		lock_v=True, fixed_h=51, single_instance=True, colour=ColourRGBA(32, 32, 40, 255)),
 	WidgetSpec("top_panel", "Header Bar", "Panels", _top_panel,
@@ -1158,6 +1411,7 @@ class CustomLayout:
 		self.gui.milkdrop_in_widget = False  # hand the visualisers back to the presets
 		self.gui.vis4_in_widget = False
 		self.gui.draw_vis4_top = False
+		self.gui.spectrogram_in_widget = False
 		self._close_menu()
 		# Force a full preset playlist render so it repaints at full size and
 		# clears the Tracklist widget's clip rect (else cache_render would keep
@@ -1669,6 +1923,10 @@ class CustomLayout:
 		sticks = count_kind(root, "vis_sticks") > 0
 		if sticks != gui.vis4_in_widget:
 			gui.vis4_in_widget = sticks
+			gui.update_layout = True
+		spectro = count_kind(root, "vis_spectrogram") > 0
+		if spectro != gui.spectrogram_in_widget:
+			gui.spectrogram_in_widget = spectro
 			gui.update_layout = True
 
 		for leaf in iter_leaves(root):

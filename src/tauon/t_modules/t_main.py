@@ -112,6 +112,7 @@ from tauon.t_modules.t_db_migrate import (  # noqa: E402
 )
 from tauon.t_modules.t_custom import (  # noqa: E402
 	GUTTER_OPTIONS as CL_GUTTER_OPTIONS,
+	SPECTRO_PRESETS as CL_SPECTRO_PRESETS,
 	STACK_COUNTS as CL_STACK_COUNTS,
 	TEMPLATES as CL_TEMPLATES,
 	WIDGET_SPECS as CL_WIDGET_SPECS,
@@ -687,6 +688,11 @@ class GuiVar:
 		# The Custom Layout Sticks visualiser widget is in the layout: makes
 		# update_layout_do() switch gui.vis to 4 so PHAZOR feeds spec4_array.
 		self.vis4_in_widget: bool = False
+		# Ditto for the Spectrogram widget (gui.vis 6): PHAZOR pushes raw
+		# spectrum columns of spectrogram_bins values into spectrogram_buffers.
+		self.spectrogram_in_widget: bool = False
+		self.spectrogram_bins: int = 256
+		self.spectrogram_buffers: list[list[float]] = []
 		self.showcase_mode: bool = False
 		self.timed_lyrics_edit_view: bool = False
 		self.timed_lyrics_editing_now: bool = False
@@ -14106,6 +14112,10 @@ class Tauon:
 				and gui.mode != GuiMode.MINI and prefs.backend == Backend.PHAZOR:
 			gui.vis = 4
 			gui.turbo = True
+		elif gui.custom_mode and gui.spectrogram_in_widget \
+				and gui.mode != GuiMode.MINI and prefs.backend == Backend.PHAZOR:
+			gui.vis = 6
+			gui.turbo = True
 		elif mini_signal_vis:
 			gui.vis = 2 if prefs.backend == Backend.PHAZOR else 0
 			gui.turbo = True
@@ -18876,6 +18886,7 @@ class Tauon:
 			pctl.stop_ref,
 			prefs.start_in_tray,  # 189
 			gui.custom_mode,  # 190
+			prefs.spectrogram_colour,  # 191
 		]
 
 		try:
@@ -48646,6 +48657,8 @@ def main(holder: Holder) -> None:
 				# Resume in the Custom Layout view. The layout itself loads
 				# lazily (ensure_slot -> load_slots) on the first render.
 				gui.custom_mode = save[190]
+			if len(save) > 191 and save[191] is not None:
+				prefs.spectrogram_colour = save[191]
 
 			del save
 			break
@@ -49264,6 +49277,29 @@ def main(holder: Holder) -> None:
 		_cl_sub_t = cl_menu.sub_number - 1
 		for _name in CL_TEMPLATES:
 			cl_menu.add_to_sub(_cl_sub_t, MenuItem(_name, cm._menu_template, args=_name))
+
+	# Right-click menu for the Spectrogram widget: colour presets.
+	spectrogram_menu = Menu(tauon, 150)
+	tauon.spectrogram_menu = spectrogram_menu
+
+	# Top-level menu items are invoked as func() with no arguments (MenuItem
+	# ``args`` only applies to submenu items), so bind the preset index in a
+	# closure per item.
+	def _spectro_set_colour(index: int) -> Callable[[], None]:
+		def cb() -> None:
+			prefs.spectrogram_colour = index
+			gui.update += 1
+		return cb
+
+	def _spectro_preset_deco(index: int, name: str) -> Callable[[], Decorator]:
+		def deco() -> Decorator:
+			text = ("✓ " if prefs.spectrogram_colour == index else "  ") + name
+			return Decorator(spectrogram_menu.colours.menu_text, spectrogram_menu.colours.menu_background, text)
+		return deco
+
+	for _i, _sp in enumerate(CL_SPECTRO_PRESETS):
+		spectrogram_menu.add(MenuItem(
+			_sp[0], _spectro_set_colour(_i), _spectro_preset_deco(_i, _sp[0])))
 
 	repeat_menu.add(MenuItem(_("Repeat OFF"), tauon.menu_repeat_off))
 	repeat_menu.add(MenuItem(_("Repeat Track"), tauon.menu_set_repeat))
