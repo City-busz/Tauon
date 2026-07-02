@@ -231,7 +231,7 @@ class TopPanelWidget(Widget):
 	"""
 
 	kind = "top_panel"
-	name = "Top Panel"
+	name = "Header Bar"
 	lock_v = True
 	fixed_h = 30
 	min_w = 80
@@ -329,7 +329,7 @@ class MetaWidget(Widget):
 
 	offscreen = True
 	min_w = 80
-	min_h = 40  # the aligned metadata sizes its album art from the height
+	min_h = 40
 	meta_method = "draw"
 
 	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
@@ -340,22 +340,15 @@ class MetaWidget(Widget):
 class MetaCenterWidget(MetaWidget):
 	# The default side-panel metadata (prefs.side_panel_layout == 0).
 	kind = "meta_center"
-	name = "Metadata: Side"
+	name = "Track: Titles"
 	meta_method = "draw"
 
 
 class MetaCenteredWidget(MetaWidget):
-	# The centered side-panel metadata (prefs.side_panel_layout == 1).
+	# Centered track text (based on the side_panel_layout == 1 layout, no art).
 	kind = "meta_centered"
-	name = "Metadata: Centered"
+	name = "Track: Centered"
 	meta_method = "centered"
-
-
-class MetaAlignWidget(MetaWidget):
-	# The horizontal art + text combo (the side-panel l_panel layout).
-	kind = "meta_align"
-	name = "Metadata: H combo"
-	meta_method = "l_panel"
 
 
 class LyricsWidget(MetaWidget):
@@ -421,7 +414,7 @@ class DetailsWidget(Widget):
 	"""
 
 	kind = "details"
-	name = "Details"
+	name = "Track: Details"
 	min_w = 100
 	min_h = 40
 	offscreen = False
@@ -665,10 +658,6 @@ def _meta_centered(spec: WidgetSpec) -> Widget:
 	return MetaCenteredWidget()
 
 
-def _meta_align(spec: WidgetSpec) -> Widget:
-	return MetaAlignWidget()
-
-
 def _lyrics(spec: WidgetSpec) -> Widget:
 	return LyricsWidget()
 
@@ -680,11 +669,6 @@ def _milkdrop(spec: WidgetSpec) -> Widget:
 # Registry — the Add menu and (de)serialization are driven by this table. The
 # lock / single-instance defaults follow the agreed widget table.
 WIDGET_SPECS: list[WidgetSpec] = [
-	WidgetSpec("top_panel", "Top Panel", "Panels", _top_panel,
-		lock_v=True, fixed_h=30, single_instance=True, draws_window_controls=True,
-		colour=ColourRGBA(38, 38, 46, 255)),
-	WidgetSpec("playback_panel", "Playback Panel", "Panels", _playback_panel,
-		lock_v=True, fixed_h=51, single_instance=True, colour=ColourRGBA(32, 32, 40, 255)),
 	WidgetSpec("tracklist", "Tracklist", "Content", _tracklist, single_instance=True,
 		colour=ColourRGBA(24, 24, 28, 255)),
 	WidgetSpec("gallery", "Album Gallery", "Content", _gallery, single_instance=True,
@@ -699,12 +683,16 @@ WIDGET_SPECS: list[WidgetSpec] = [
 	WidgetSpec("queue", "Queue", "Side Panels", _queue, single_instance=True,
 		colour=ColourRGBA(28, 26, 24, 255)),
 	WidgetSpec("lyrics", "Lyrics Box", "Content", _lyrics, single_instance=True, colour=ColourRGBA(26, 26, 30, 255)),
-	WidgetSpec("meta_center", "Metadata: Side", "Content", _meta_center, colour=ColourRGBA(30, 30, 34, 255)),
-	WidgetSpec("meta_centered", "Metadata: Centered", "Content", _meta_centered, colour=ColourRGBA(30, 31, 35, 255)),
-	WidgetSpec("meta_align", "Metadata: H combo", "Content", _meta_align, colour=ColourRGBA(30, 32, 34, 255)),
-	WidgetSpec("details", "Details", "Content", _details, colour=ColourRGBA(28, 30, 36, 255)),
+	WidgetSpec("meta_center", "Track: Titles", "Content", _meta_center, colour=ColourRGBA(30, 30, 34, 255)),
+	WidgetSpec("meta_centered", "Track: Centered", "Content", _meta_centered, colour=ColourRGBA(30, 31, 35, 255)),
+	WidgetSpec("details", "Track: Details", "Content", _details, colour=ColourRGBA(28, 30, 36, 255)),
 	WidgetSpec("milkdrop", "MilkDrop Box", "Visualizers", _milkdrop,
 		single_instance=True, colour=ColourRGBA(18, 18, 28, 255)),
+	WidgetSpec("playback_panel", "Playback Panel", "Panels", _playback_panel,
+		lock_v=True, fixed_h=51, single_instance=True, colour=ColourRGBA(32, 32, 40, 255)),
+	WidgetSpec("top_panel", "Header Bar", "Panels", _top_panel,
+		lock_v=True, fixed_h=30, single_instance=True, draws_window_controls=True,
+		colour=ColourRGBA(38, 38, 46, 255)),
 ]
 SPEC_BY_KIND: dict[str, WidgetSpec] = {s.kind: s for s in WIDGET_SPECS}
 
@@ -1777,6 +1765,8 @@ class CustomLayout:
 		for _orient, brect, _stack, _idx in self._iter_boundaries(root, grab):
 			self.tauon.fields.add(brect)
 
+		self._draw_widget_labels(root)
+
 		menu_active = self.menu is not None and self.menu.active
 		mx, my = inp.mouse_position[0], inp.mouse_position[1]
 
@@ -1824,6 +1814,27 @@ class CustomLayout:
 			ddt.rect((x, y, b, h), edge)
 			ddt.rect((x + w - b, y, b, h), edge)
 			ddt.rect((x, y, w, h), ColourRGBA(170, 225, 90, 18))
+
+	def _draw_widget_labels(self, root: Node) -> None:
+		"""Name tag in the top-left corner of every widget segment (edit mode),
+		in the same style as the album-art hover metadata tags."""
+		ddt = self.ddt
+		scale = self.gui.scale
+		pad = round(6 * scale)
+		tag_h = round(18 * scale)
+		for lf in iter_leaves(root):
+			if lf.widget is None:
+				continue
+			x, y, w, h = lf.rect
+			if w < 50 * scale or h < tag_h + pad * 2:
+				continue
+			name = lf.widget.name
+			tag_w = min(ddt.get_text_w(name, 12) + round(12 * scale), round(w) - pad * 2)
+			xx = round(x) + pad
+			yy = round(y) + pad
+			ddt.rect_a((xx, yy), (tag_w, tag_h), ColourRGBA(8, 8, 8, 255))
+			ddt.text((xx + round(6 * scale), yy), name, ColourRGBA(200, 200, 200, 255), 12,
+				bg=ColourRGBA(30, 30, 30, 255), max_w=tag_w - round(10 * scale))
 
 	# -- window controls fallback -------------------------------------------
 

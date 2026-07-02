@@ -39894,9 +39894,9 @@ class MetaBox:
 								self.tauon.enter_showcase_view(track_id=tr.index)
 
 	def centered(self, x: int, y: int, w: int, h: int, track: TrackClass | None) -> None:
-		"""The centered side-panel metadata layout (prefs.side_panel_layout == 1):
-		centred art with the artist/title/album text centred below. Mirrors the
-		inline rendering used by the standard right side panel."""
+		"""Centered track text layout used by the custom-layout "Track: Centered"
+		widget: artist/title/album text centred in the box, no album art. Based on
+		the centered side-panel layout (prefs.side_panel_layout == 1)."""
 		ddt = self.ddt
 		colours = self.colours
 		tauon = self.tauon
@@ -39916,35 +39916,11 @@ class MetaBox:
 			if inp.right_click and tauon.coll((x, y, w, h)) and target_track:
 				center_info_menu.activate(target_track)
 		else:
-			box_wide_w = round(w * 0.98)
-			boxx = round(min(h * 0.7, w * 0.9))
-			boxy = round(min(h * 0.7, w * 0.9))
-			bx = (x + w // 2) - (boxx // 2)
-			bx_wide = (x + w // 2) - (box_wide_w // 2)
-			by = round(h * 0.1)
-			bby = by + boxy
-			text_y = (y + by + boxy + ((h - bby) // 2) - 44 * gui.scale - round((h - bby - 94 * gui.scale) * 0.08))
-			small_mode = False
-			if window_size[1] < 550 * gui.scale:
-				small_mode = True
-				text_y = y + by + boxy + ((h - bby) // 2) - 38 * gui.scale
+			small_mode = window_size[1] < 550 * gui.scale
+			text_y = y + round(h * 0.40)
 			text_x = x + w // 2
-			if prefs.show_side_art:
-				gui.art_drawn_rect = None
-				default_border = (bx, by, boxx, boxy)
-				coll_border = default_border
-				tauon.art_box.draw(
-					bx_wide, by, box_wide_w, boxy, target_track=target_track,
-					tight_border=True, default_border=default_border)
-				if gui.art_drawn_rect:
-					coll_border = gui.art_drawn_rect
-				if inp.right_click and tauon.coll((x, y, w, h)) and not tauon.coll(coll_border):
-					if tauon.is_level_zero(include_menus=False) and target_track:
-						center_info_menu.activate(target_track)
-			else:
-				text_y = y + round(h * 0.40)
-				if inp.right_click and tauon.coll((x, y, w, h)) and target_track:
-					center_info_menu.activate(target_track)
+			if inp.right_click and tauon.coll((x, y, w, h)) and target_track:
+				center_info_menu.activate(target_track)
 			ww = w - 25 * gui.scale
 			gui.showed_title = True
 			if target_track:
@@ -49266,8 +49242,8 @@ def main(holder: Holder) -> None:
 		cl_menu.add(MenuItem(_("Unlock Vertical"), cm._menu_lock_v, show_test=cm._t_locked_v))
 		cl_menu.add(MenuItem(_("Lock Horizontal"), cm._menu_lock_h, show_test=cm._t_unlocked_h))
 		cl_menu.add(MenuItem(_("Unlock Horizontal"), cm._menu_lock_h, show_test=cm._t_locked_h))
-		cl_menu.add(MenuItem(_("Lock Aspect"), cm._menu_lock_aspect, show_test=cm._t_aspect_off))
-		cl_menu.add(MenuItem(_("Unlock Aspect"), cm._menu_lock_aspect, show_test=cm._t_aspect_on))
+		cl_menu.add(MenuItem(_("Lock Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_off))
+		cl_menu.add(MenuItem(_("Unlock Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_on))
 		cl_menu.add_sub(_("Gutter…"), 60)
 		_cl_sub_g = cl_menu.sub_number - 1
 		for _g in CL_GUTTER_OPTIONS:
