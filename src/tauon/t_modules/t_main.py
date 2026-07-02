@@ -684,6 +684,9 @@ class GuiVar:
 		# The Custom Layout MilkDrop Box widget owns the (singleton) visualiser:
 		# gates the ArtBox / MetaBox milk paths off so both never run at once.
 		self.milkdrop_in_widget: bool = False
+		# The Custom Layout Sticks visualiser widget is in the layout: makes
+		# update_layout_do() switch gui.vis to 4 so PHAZOR feeds spec4_array.
+		self.vis4_in_widget: bool = False
 		self.showcase_mode: bool = False
 		self.timed_lyrics_edit_view: bool = False
 		self.timed_lyrics_editing_now: bool = False
@@ -14098,7 +14101,9 @@ class Tauon:
 		gui.draw_vis4_top = False
 		mini_signal_vis = gui.mode == GuiMode.MINI and prefs.mini_mode_mode == MiniModeMode.SIGNAL
 
-		if gui.combo_mode and gui.showcase_mode and prefs.showcase_vis and gui.mode != GuiMode.MINI and prefs.backend == Backend.PHAZOR:
+		if ((gui.combo_mode and gui.showcase_mode and prefs.showcase_vis)
+				or (gui.custom_mode and gui.vis4_in_widget)) \
+				and gui.mode != GuiMode.MINI and prefs.backend == Backend.PHAZOR:
 			gui.vis = 4
 			gui.turbo = True
 		elif mini_signal_vis:
@@ -50208,6 +50213,7 @@ def main(holder: Holder) -> None:
 	meta_box = MetaBox(tauon)
 	tauon.meta_box = meta_box  # exposed for the Custom Layout metadata/lyrics widgets
 	showcase = Showcase(tauon)
+	tauon.showcase = showcase  # exposed for the Custom Layout Sticks visualiser widget
 
 	def render_gallery() -> None:
 		"""Render the album gallery grid (art tiles, scrolling, input handling and

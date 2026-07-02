@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Callable
 
 import sdl3
 
-from tauon.t_modules.t_enums import PlayingState
+from tauon.t_modules.t_enums import Backend, PlayingState
 from tauon.t_modules.t_extra import ColourRGBA, get_display_time
 
 if TYPE_CHECKING:
@@ -137,7 +137,7 @@ class MilkDropWidget(Widget):
 	"""
 
 	kind = "milkdrop"
-	name = "MilkDrop Box"
+	name = "Visualiser: Milkdrop"
 	min_w = 64
 	min_h = 48
 	single_instance = True
@@ -215,6 +215,45 @@ class MilkDropWidget(Widget):
 			tauon.milky.fps.reset()
 		yy += round(30 * gui.scale)
 		tag(f"FPS: {round(tauon.milky.fps.get())}", yy, 12, 14, ColourRGBA(210, 210, 210, 255))
+
+
+class SticksVisWidget(Widget):
+	"""The showcase view's bar ("sticks") visualiser, reused. The spectrum data
+	(gui.spec4_array) is only produced by the PHAZOR vis thread while
+	gui.vis == 4, so the engine flags gui.vis4_in_widget and update_layout_do()
+	switches the mode while the widget is in the layout. Drawing reuses
+	Showcase.render_vis unchanged: the bar strip is a fixed-size texture
+	blitted at gui.spec4_rec, which we centre in the segment; like the
+	showcase, the draw is deferred to the main loop's top-level pass
+	(gui.draw_vis4_top) unless a dialog is open, in which case it renders
+	inline so it stays underneath.
+	"""
+
+	kind = "vis_sticks"
+	name = "Visualiser: Sticks"
+	min_w = 326  # gui.spec4_rec is a fixed 322x100 (scaled) strip
+	min_h = 104
+	single_instance = True
+	offscreen = False  # positions/defers only; real drawing is at screen coords
+
+	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
+		gui = tauon.gui
+		rec = gui.spec4_rec
+		rec.x = round(x + (w - rec.w) / 2)
+		rec.y = round(y + (h - rec.h) / 2)
+		if tauon.prefs.backend != Backend.PHAZOR:
+			tauon.ddt.text_background_colour = ColourRGBA(8, 8, 8, 255)
+			tauon.ddt.text(
+				(round(x + w / 2), round(y + h / 2) - round(8 * gui.scale), 2),
+				_t("Visualiser requires the Phazor backend"), ColourRGBA(110, 110, 110, 255), 212,
+				max_w=round(w) - round(8 * gui.scale))
+			return
+		if gui.vis != 4:
+			return  # switches on the next layout update
+		if gui.message_box or not tauon.is_level_zero(include_menus=True):
+			tauon.showcase.render_vis()
+		else:
+			gui.draw_vis4_top = True
 
 
 class TopPanelWidget(Widget):
@@ -518,7 +557,7 @@ class DetailsWidget(Widget):
 			# ddt.text's y is baseline-anchored internally but offset back by
 			# 13*scale in t_draw for legacy compat, so it behaves near enough to
 			# a top anchor; this centres these fonts in the 22*scale row.
-			ty = ry + round(4 * gui.scale) + 4
+			ty = ry + round(4 * gui.scale) + 2
 			lc = colours.side_bar_line2
 			if empty:
 				lc = ColourRGBA(lc.r, lc.g, lc.b, round(lc.a * fade))
@@ -691,6 +730,10 @@ def _milkdrop(spec: WidgetSpec) -> Widget:
 	return MilkDropWidget()
 
 
+def _vis_sticks(spec: WidgetSpec) -> Widget:
+	return SticksVisWidget()
+
+
 # Registry — the Add menu and (de)serialization are driven by this table. The
 # lock / single-instance defaults follow the agreed widget table.
 WIDGET_SPECS: list[WidgetSpec] = [
@@ -713,8 +756,10 @@ WIDGET_SPECS: list[WidgetSpec] = [
 	WidgetSpec("details", "Track: Details", "Content", _details, colour=ColourRGBA(28, 30, 36, 255)),
 	WidgetSpec("artist_info", "Artist Info", "Content", _artist_info, single_instance=True,
 		colour=ColourRGBA(30, 28, 34, 255)),
-	WidgetSpec("milkdrop", "MilkDrop Box", "Visualizers", _milkdrop,
+	WidgetSpec("milkdrop", "Visualiser: Milkdrop", "Visualizers", _milkdrop,
 		single_instance=True, colour=ColourRGBA(18, 18, 28, 255)),
+	WidgetSpec("vis_sticks", "Visualiser: Sticks", "Visualizers", _vis_sticks,
+		single_instance=True, colour=ColourRGBA(16, 16, 22, 255)),
 	WidgetSpec("playback_panel", "Playback Panel", "Panels", _playback_panel,
 		lock_v=True, fixed_h=51, single_instance=True, colour=ColourRGBA(32, 32, 40, 255)),
 	WidgetSpec("top_panel", "Header Bar", "Panels", _top_panel,
@@ -1110,7 +1155,9 @@ class CustomLayout:
 	def exit_mode(self) -> None:
 		self.gui.custom_mode = False
 		self.gui.custom_edit = False
-		self.gui.milkdrop_in_widget = False  # hand the visualiser back to the presets
+		self.gui.milkdrop_in_widget = False  # hand the visualisers back to the presets
+		self.gui.vis4_in_widget = False
+		self.gui.draw_vis4_top = False
 		self._close_menu()
 		# Force a full preset playlist render so it repaints at full size and
 		# clears the Tracklist widget's clip rect (else cache_render would keep
@@ -1615,6 +1662,14 @@ class CustomLayout:
 		# drive it at once. Set before drawing so it holds regardless of the
 		# widgets' draw order within this frame.
 		gui.milkdrop_in_widget = count_kind(root, "milkdrop") > 0
+
+		# Same ownership idea for the Sticks visualiser, but the gui.vis mode
+		# switch lives in update_layout_do(), so poke a layout update when the
+		# widget appears/disappears.
+		sticks = count_kind(root, "vis_sticks") > 0
+		if sticks != gui.vis4_in_widget:
+			gui.vis4_in_widget = sticks
+			gui.update_layout = True
 
 		for leaf in iter_leaves(root):
 			if isinstance(leaf, Leaf):
