@@ -49274,6 +49274,8 @@ def main(holder: Holder) -> None:
 			cl_menu.add_to_sub(_cl_sub_g, MenuItem(f"{_g}px", cm._menu_gutter, args=_g))
 		cl_menu.add(MenuItem(_("Border"), cm._menu_border, show_test=cm._t_border_off))
 		cl_menu.add(MenuItem(_("Remove Border"), cm._menu_border, show_test=cm._t_border_on))
+		cl_menu.add(MenuItem(_("Make Stack Resizable"), cm._menu_stack_resizable, show_test=cm._t_stack_resizable_off))
+		cl_menu.add(MenuItem(_("Make Stack Not Resizable"), cm._menu_stack_resizable, show_test=cm._t_stack_resizable_on))
 		cl_menu.br()
 		cl_menu.add_sub(_("Load Template…"), 110)
 		_cl_sub_t = cl_menu.sub_number - 1

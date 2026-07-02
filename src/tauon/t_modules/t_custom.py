@@ -15,7 +15,9 @@ Implemented here:
   by ``weight``; the cross axis fills.
 * Edit mode: hover highlight, right-click context menu (Add stack / Add widget /
   Remove / Remove Stack / Lock V/H/Aspect / Gutter / Border / Load Template),
-  edge-drag resizing with weight/pixel semantics and resize cursors.
+  edge-drag resizing with weight/pixel semantics and resize cursors. Stacks
+  can opt in to view-mode resizing ("Make Stack Resizable"): their child
+  boundaries stay draggable with edit mode off.
 * Validation: single-instance widgets are gated. A row/column may be fully
   locked; leftover space along the axis stays background.
 * Offscreen render-to-rect compositing (shared ``gui.tracklist_texture`` scratch
@@ -688,6 +690,91 @@ class TracklistWidget(Widget):
 
 	def __init__(self) -> None:
 		self._last_rect: tuple | None = None
+		# Scroll bar drag state: whether the thumb is held, and the pointer's
+		# offset within the thumb when it was grabbed.
+		self._sb_hold = False
+		self._sb_grab = 0.0
+
+	def _sb_geometry(self, tauon: Tauon, rect: tuple) -> dict | None:
+		"""Scroll bar geometry for the segment, or None when the playlist fits
+		(no bar). Same style as the standard tracklist bar: a full-height track
+		at the right edge with a fixed-length thumb."""
+		gui = tauon.gui
+		scale = gui.scale
+		x, y, w, h = rect
+		total = len(tauon.pctl.default_playlist)
+		if total == 0 or total * max(gui.playlist_row_height, 1) <= h:
+			return None
+		width = round(15 * scale)
+		sx = x + w - width - round(2 * scale)
+		top = y
+		ey = y + h
+		sbl = round((85 if total < 50 else 105) * scale)
+		if ey - top <= sbl:
+			return None
+		per = (tauon.pctl.playlist_view_position
+			+ (gui.playlist_scroll_pixels / max(gui.playlist_row_height, 1))) / total
+		sbp = top + (ey - top - sbl) * min(max(per, 0.0), 1.0)
+		sbp = min(max(sbp, top), ey - sbl)
+		hitbox = (sx - round(6 * scale), top, width + round(8 * scale), h)
+		return {"sx": sx, "width": width, "top": top, "ey": ey, "sbp": sbp,
+			"sbl": sbl, "hitbox": hitbox, "total": total}
+
+	def _scrollbar_input(self, tauon: Tauon, g: dict | None) -> bool:
+		"""Handle press/drag on the scroll bar. Returns True while the bar owns
+		the pointer (press landed on it or a drag is live), so the body render
+		can be shielded from those events."""
+		gui = tauon.gui
+		inp = tauon.inp
+		if g is None or gui.custom_edit:
+			self._sb_hold = False
+			return False
+		mx, my = inp.mouse_position[0], inp.mouse_position[1]
+		hx, hy, hw, hh = g["hitbox"]
+		over_bar = hx <= mx < hx + hw and hy <= my < hy + hh
+		if inp.mouse_click and over_bar:
+			if g["sbp"] <= my < g["sbp"] + g["sbl"]:
+				self._sb_grab = my - g["sbp"]  # grab the thumb where pressed
+			else:
+				self._sb_grab = g["sbl"] / 2   # jump: centre the thumb on the pointer
+			self._sb_hold = True
+		if self._sb_hold:
+			if not inp.mouse_down:
+				self._sb_hold = False
+			else:
+				# Keep receiving motion while the pointer leaves the window,
+				# like the standard bar.
+				tauon.input_sdl.mouse_capture_want = True
+				sbp = min(max(my - self._sb_grab, g["top"]), g["ey"] - g["sbl"])
+				per = (sbp - g["top"]) / (g["ey"] - g["top"] - g["sbl"])
+				tauon.pctl.playlist_view_position = min(max(int(g["total"] * per), 0), g["total"])
+				gui.playlist_scroll_pixels = 0
+				gui.pl_update = 1
+				g["sbp"] = sbp
+		return self._sb_hold or over_bar
+
+	def _draw_scrollbar(self, tauon: Tauon, g: dict | None) -> None:
+		if g is None:
+			return
+		gui = tauon.gui
+		ddt = tauon.ddt
+		colours = tauon.colours
+		bg = ColourRGBA(255, 255, 255, 6)
+		fg = colours.scroll_colour
+		if colours.lm:
+			bg = ColourRGBA(200, 200, 200, 100)
+			fg = ColourRGBA(100, 100, 100, 200)
+		# Hover repaint fields for the bar and the thumb within it.
+		tauon.fields.add(g["hitbox"])
+		tauon.fields.add((g["hitbox"][0], g["sbp"], g["hitbox"][2], g["sbl"]))
+		ddt.rect_a((g["sx"], g["top"]), (g["width"] + round(1 * gui.scale), g["ey"] - g["top"]), bg)
+		ddt.rect_a((g["sx"] + 1, g["sbp"]), (g["width"], g["sbl"]), fg)
+		hx, hy, hw, _hh = g["hitbox"]
+		mx, my = tauon.inp.mouse_position[0], tauon.inp.mouse_position[1]
+		over_thumb = hx <= mx < hx + hw and g["sbp"] <= my < g["sbp"] + g["sbl"]
+		if self._sb_hold or over_thumb:
+			ddt.rect_a((g["sx"] + round(1 * gui.scale), g["sbp"]), (g["width"], g["sbl"]),
+				ColourRGBA(255, 255, 255, 19))
 
 	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
 		pr = tauon.playlist_render
@@ -700,17 +787,31 @@ class TracklistWidget(Widget):
 		mx, my = inp.mouse_position[0], inp.mouse_position[1]
 		over = rect[0] <= mx < rect[0] + rect[2] and rect[1] <= my < rect[1] + rect[3]
 		interacting = over or inp.mouse_click or inp.right_click or inp.mouse_down or inp.mouse_wheel != 0
-		if gui.pl_update > 0 or rect != self._last_rect or interacting:
-			# Mirror the standard path: heart_fields is repopulated by full_render,
-			# so it must be cleared first or it grows unbounded every frame (the
-			# normal loop clears it before its full_render; that path is skipped in
-			# custom mode).
-			gui.heart_fields.clear()
-			pr.full_render(rect=rect)
-			self._last_rect = rect
-			gui.pl_update = 0
-		else:
-			pr.cache_render()
+		# Scroll bar input runs before the body render (it may set pl_update);
+		# while the bar owns the pointer, hide the mouse from the body so a
+		# thumb drag doesn't also select/hover rows underneath.
+		g = self._sb_geometry(tauon, rect)
+		sb_engaged = self._scrollbar_input(tauon, g)
+		saved_pos = (inp.mouse_position[0], inp.mouse_position[1])
+		if sb_engaged:
+			inp.mouse_position[0] = -99999
+			inp.mouse_position[1] = -99999
+		try:
+			if gui.pl_update > 0 or rect != self._last_rect or interacting:
+				# Mirror the standard path: heart_fields is repopulated by full_render,
+				# so it must be cleared first or it grows unbounded every frame (the
+				# normal loop clears it before its full_render; that path is skipped in
+				# custom mode).
+				gui.heart_fields.clear()
+				pr.full_render(rect=rect)
+				self._last_rect = rect
+				gui.pl_update = 0
+			else:
+				pr.cache_render()
+		finally:
+			if sb_engaged:
+				inp.mouse_position[0], inp.mouse_position[1] = saved_pos
+		self._draw_scrollbar(tauon, g)
 
 
 class DetailsWidget(Widget):
@@ -1112,11 +1213,15 @@ class Stack(Node):
 		assert orient in ("v", "h")
 		self.orient = orient
 		self.children = children
+		# When set, the boundaries between this stack's children can be dragged
+		# in view mode too (edit mode off).
+		self.resizable: bool = False
 
 	def to_dict(self) -> dict:
 		d = self._base_dict()
 		d["type"] = "stack"
 		d["orient"] = self.orient
+		d["resizable"] = self.resizable
 		d["children"] = [c.to_dict() for c in self.children]
 		return d
 
@@ -1124,6 +1229,7 @@ class Stack(Node):
 	def from_dict(d: dict) -> "Stack":
 		st = Stack(d.get("orient", "v"), [node_from_dict(c) for c in d.get("children", [])])
 		st._load_base(d)
+		st.resizable = d.get("resizable", False)
 		return st
 
 
@@ -1322,7 +1428,12 @@ def count_kind(root: Node, kind: str) -> int:
 # Engine
 # ---------------------------------------------------------------------------
 
-GUTTER_OPTIONS = [0, 2, 3, 4, 8, 16]
+GUTTER_OPTIONS = [0, 2, 3, 4, 8, 9, 16]
+# Half-width (unscaled px) of the grab band around a stack boundary for resize
+# dragging. One constant so the drag hit-test, the hover fields and the resize
+# cursor stay aligned — a mismatch makes the cursor stick or show where a drag
+# can't start.
+BOUNDARY_GRAB = 9
 # Defaults applied to a segment when a widget is first added to it (Add menu
 # and template leaves). Replacing an existing widget keeps the segment's
 # configured gutter/border.
@@ -1354,6 +1465,9 @@ class CustomLayout:
 		# state, stashed while the underlying UI is neutralised, then restored so
 		# the custom widgets receive it during their own render.
 		self._held_mouse: tuple | None = None
+		# Real held-button state during a view-mode boundary drag (the stash above
+		# gets a neutralised copy so widgets don't react); re-applied after render.
+		self._drag_held_down: bool = False
 		# Dedicated scratch texture for offscreen widget compositing, kept separate
 		# from gui.tracklist_texture so the Tracklist widget can keep caching into
 		# that. Created lazily and recreated if the max window texture size grows.
@@ -1589,6 +1703,13 @@ class CustomLayout:
 		target.square = not target.square
 		self.save_slots()
 
+	def act_toggle_stack_resizable(self, stack: Stack) -> None:
+		"""Toggle view-mode resizing for a stack: when set, the boundaries
+		between its children can be dragged with edit mode off (same weight/px
+		semantics as edit-mode resizing)."""
+		stack.resizable = not stack.resizable
+		self.save_slots()
+
 	def act_set_gutter(self, target: Node, px: int) -> None:
 		target.gutter = px
 		self.save_slots()
@@ -1651,6 +1772,48 @@ class CustomLayout:
 			return
 
 		if not gui.custom_edit:
+			# Boundary resize on stacks marked resizable works with edit mode off.
+			# While a drag is live (or starting), swallow the buttons/wheel before
+			# the stash below so the widgets underneath don't also react — only the
+			# position reaches them (for hover).
+			dragging = False
+			if self.drag is not None:
+				if inp.mouse_down:
+					self._drag_move(inp)
+				else:
+					self.drag = None
+					self.save_slots()
+				dragging = True
+			elif inp.mouse_click and self._try_start_drag(inp, resizable_only=True):
+				dragging = True
+			if dragging:
+				# mouse_down is a persistent held flag (SDL only flips it on
+				# press/release events), so zeroing it here would also zero the
+				# stash below, render()'s restore would carry False into the next
+				# frame and the drag would end after one frame. Remember the real
+				# state; render() re-applies it after the widgets have drawn.
+				self._drag_held_down = inp.mouse_down
+				inp.mouse_click = False
+				inp.right_click = False
+				inp.mouse_down = False
+				inp.mouse_up = False
+				inp.mouse_wheel = 0
+
+			# Decide the resize cursor here, at frame start with the untouched
+			# mouse — the same state the drag hit-test uses. _view_resize_hints
+			# re-asserts it at end of render, but widget rendering in between can
+			# perturb input state and make that late hit-test miss even though a
+			# drag here would work; this early set is what the user actually sees.
+			if self.drag is not None:
+				gui.cursor_want = 12 if self.drag["axis"] == "v" else 1
+			else:
+				root = self.ensure_slot()
+				layout(root, 0, 0, self.tauon.window_size[0], self.tauon.window_size[1], gui.scale)
+				grab = BOUNDARY_GRAB * gui.scale
+				hit = self._boundary_at(root, inp.mouse_position[0], inp.mouse_position[1], grab, resizable_only=True)
+				if hit is not None:
+					gui.cursor_want = 12 if hit[0] == "v" else 1
+
 			# View mode: the widgets handle their own input during render(), which
 			# runs later in the frame. Stash the real mouse and neutralise it so
 			# the (hidden) standard UI underneath doesn't also react; render()
@@ -1731,13 +1894,27 @@ class CustomLayout:
 
 	# -- drag ----------------------------------------------------------------
 
-	def _try_start_drag(self, inp) -> bool:
+	def _try_start_drag(self, inp, resizable_only: bool = False) -> bool:
 		root = self.ensure_slot()
 		layout(root, 0, 0, self.tauon.window_size[0], self.tauon.window_size[1], self.gui.scale)
-		grab = 5 * self.gui.scale
-		hit = self._boundary_at(root, inp.mouse_position[0], inp.mouse_position[1], grab)
+		grab = BOUNDARY_GRAB * self.gui.scale
+		hit = self._boundary_at(root, inp.mouse_position[0], inp.mouse_position[1], grab, resizable_only)
 		if hit is not None:
 			orient, stack, index = hit
+			# A Square Max child has no stored size to edit (its length tracks
+			# the cross extent), so a drag on its boundary would shift weights it
+			# ignores and visibly do nothing. Dragging is an explicit manual
+			# override: convert it to a plain axis lock at its current size and
+			# resize that (Square Max can be re-enabled from the menu).
+			for child in (stack.children[index], stack.children[index + 1]):
+				if child.square and _fixed_on(child, stack.orient, self.gui.scale) is None:
+					child.square = False
+					if stack.orient == "v":
+						child.lock_v = True
+						child.fixed_h = max(1, round(child.slot_rect[3] / self.gui.scale))
+					else:
+						child.lock_h = True
+						child.fixed_w = max(1, round(child.slot_rect[2] / self.gui.scale))
 			self.drag = {"stack": stack, "index": index, "axis": stack.orient,
 				"last": (inp.mouse_position[0], inp.mouse_position[1])}
 			return True
@@ -1762,8 +1939,14 @@ class CustomLayout:
 			for c in node.children:
 				yield from self._iter_boundaries(c, grab)
 
-	def _boundary_at(self, node: Node, mx: float, my: float, grab: float):
+	def _boundary_at(self, node: Node, mx: float, my: float, grab: float,
+			resizable_only: bool = False):
+		"""First boundary under the point. With ``resizable_only`` only stacks
+		flagged resizable count (the view-mode path), so a non-resizable outer
+		boundary can't shadow a resizable nested one."""
 		for orient, rect, stack, index in self._iter_boundaries(node, grab):
+			if resizable_only and not stack.resizable:
+				continue
 			rx, ry, rw, rh = rect
 			if rx <= mx < rx + rw and ry <= my < ry + rh:
 				return (orient, stack, index)
@@ -1794,21 +1977,23 @@ class CustomLayout:
 			# negative weight — the boundary then jumps the opposite way.
 			return n.slot_rect[3] if axis == "v" else n.slot_rect[2]
 
-		if a_locked and not b_locked:
+		if a_locked:
+			# Covers both-locked too: the boundary follows the mouse by editing
+			# the leading child's px; the trailing child keeps its px and slides.
 			cur = (a.fixed_h if axis == "v" else a.fixed_w) * scale
 			newpx = max(min_px, cur + delta)
 			if axis == "v":
 				a.fixed_h = round(newpx / scale)
 			else:
 				a.fixed_w = round(newpx / scale)
-		elif b_locked and not a_locked:
+		elif b_locked:
 			cur = (b.fixed_h if axis == "v" else b.fixed_w) * scale
 			newpx = max(min_px, cur - delta)
 			if axis == "v":
 				b.fixed_h = round(newpx / scale)
 			else:
 				b.fixed_w = round(newpx / scale)
-		elif not a_locked and not b_locked:
+		else:
 			pa, pb = px(a), px(b)
 			total_px = pa + pb
 			total_w = a.weight + b.weight
@@ -1871,6 +2056,11 @@ class CustomLayout:
 		if self.menu_target is not None:
 			self.act_toggle_square(self.menu_target)
 
+	def _menu_stack_resizable(self) -> None:
+		stack = self._resizable_stack_node()
+		if stack is not None:
+			self.act_toggle_stack_resizable(stack)
+
 	def _menu_border(self) -> None:
 		if self.menu_target is not None:
 			self.act_toggle_border(self.menu_target)
@@ -1929,6 +2119,25 @@ class CustomLayout:
 
 	def _t_square_off(self, ref=None) -> bool:
 		return self.menu_target is not None and not self.menu_target.square
+
+	def _resizable_stack_node(self) -> Stack | None:
+		"""The stack the resizable toggle acts on: the right-clicked segment's
+		immediate parent stack (same targeting as Remove Stack), or the segment
+		itself when the click landed on a stack's background."""
+		if self.menu_target is None:
+			return None
+		if isinstance(self.menu_target, Stack):
+			return self.menu_target
+		root = self.ensure_slot()
+		return find_parent(root, self.menu_target)
+
+	def _t_stack_resizable_on(self, ref=None) -> bool:
+		stack = self._resizable_stack_node()
+		return stack is not None and stack.resizable
+
+	def _t_stack_resizable_off(self, ref=None) -> bool:
+		stack = self._resizable_stack_node()
+		return stack is not None and not stack.resizable
 
 	def _t_border_on(self, ref=None) -> bool:
 		return self.menu_target is not None and self.menu_target.border
@@ -1998,9 +2207,42 @@ class CustomLayout:
 
 		if gui.custom_edit:
 			self._draw_edit_overlay(root)
+		else:
+			self._view_resize_hints(root)
+			if self.drag is not None:
+				# Re-apply the real held-button state a view-mode boundary drag
+				# swallowed from the widgets, so next frame's handle_input still
+				# sees the button down and the drag continues.
+				inp.mouse_down = self._drag_held_down
 
 		# Corner edit-toggle button, on top, in both view and edit mode.
 		self._draw_corner_edit_button()
+
+	def _view_resize_hints(self, root: Node) -> None:
+		"""View-mode counterpart of the edit overlay's boundary handling, for
+		stacks marked resizable: register their boundary hot spots as hover
+		fields (so crossing them repaints) and show the resize cursor."""
+		gui = self.gui
+		inp = self.tauon.inp
+		grab = BOUNDARY_GRAB * gui.scale
+		found = False
+		for _orient, brect, stack, _idx in self._iter_boundaries(root, grab):
+			if stack.resizable:
+				self.tauon.fields.add(brect)
+				found = True
+		if not found:
+			return
+		from tauon.t_modules.t_main import Menu  # local import avoids cycle
+		if Menu.active or gui.message_box:
+			return
+		if self.drag is not None:
+			# Keep the cursor while dragging even when the pointer outruns the
+			# hot spot.
+			gui.cursor_want = 12 if self.drag["axis"] == "v" else 1
+			return
+		hit = self._boundary_at(root, inp.mouse_position[0], inp.mouse_position[1], grab, resizable_only=True)
+		if hit is not None:
+			gui.cursor_want = 12 if hit[0] == "v" else 1
 
 	# -- corner edit-toggle button ------------------------------------------
 
@@ -2169,7 +2411,7 @@ class CustomLayout:
 		ww, wh = self.tauon.window_size[0], self.tauon.window_size[1]
 		ddt.rect((0, 0, ww, wh), ColourRGBA(170, 225, 90, 10))
 
-		grab = 5 * gui.scale
+		grab = BOUNDARY_GRAB * gui.scale
 		# Register hover regions so the GUI repaints as the mouse moves across
 		# segments and resize boundaries. Tauon only redraws when the set of
 		# fields under the cursor changes (see fields.test() in the main loop),
@@ -2211,12 +2453,17 @@ class CustomLayout:
 		if menu_active:
 			seg = self.menu_target
 		else:
-			hit = self._boundary_at(root, mx, my, grab)
-			if hit is not None:
-				# 12 = custom NS-resize cursor (see dispatch in main loop); 1 =
-				# EW-resize (cursor_shift). cursor_top_side (9) isn't an NS cursor
-				# on macOS/Linux, so we use our own.
-				gui.cursor_want = 12 if hit[0] == "v" else 1
+			if self.drag is not None:
+				# Hold the resize cursor while a drag is live, even when the
+				# pointer outruns the grab band between frames.
+				gui.cursor_want = 12 if self.drag["axis"] == "v" else 1
+			else:
+				hit = self._boundary_at(root, mx, my, grab)
+				if hit is not None:
+					# 12 = custom NS-resize cursor (see dispatch in main loop); 1 =
+					# EW-resize (cursor_shift). cursor_top_side (9) isn't an NS cursor
+					# on macOS/Linux, so we use our own.
+					gui.cursor_want = 12 if hit[0] == "v" else 1
 			seg = leaf_at(root, mx, my)
 		if seg is not None:
 			# Yellow highlight on the hovered segment itself.
