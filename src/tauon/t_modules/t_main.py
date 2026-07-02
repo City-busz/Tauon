@@ -30968,7 +30968,9 @@ class TopPanel:
 					wwx += 33
 				wwx = round(wwx * gui.scale)
 
-		rect = (wwx + 9 * gui.scale, yy + 4 * gui.scale, 34 * gui.scale, 25 * gui.scale)
+		# The panel button sits in the second corner slot; the layout/edit-menu
+		# button (below) takes the first, matching its position in custom mode.
+		rect = (wwx + 44 * gui.scale, yy + 4 * gui.scale, 34 * gui.scale, 25 * gui.scale)
 		self.fields.add(rect)
 
 		if self.coll(rect) and not prefs.shuffle_lock and not gui.custom_mode:
@@ -31007,30 +31009,32 @@ class TopPanel:
 
 		if not prefs.shuffle_lock and not gui.custom_mode:
 			# The panel button hides in custom mode (the layout/edit button below
-			# is drawn by the layout engine there instead, in this first slot).
+			# keeps the first slot there, drawn by the layout engine).
 			if gui.combo_mode:
-				self.return_icon.render(wwx + 14 * gui.scale, yy + 8 * gui.scale, colour)
+				self.return_icon.render(wwx + 49 * gui.scale, yy + 8 * gui.scale, colour)
 			elif prefs.left_panel_mode == "artist list":
-				self.artist_list_icon.render(wwx + 13 * gui.scale, yy + 8 * gui.scale, colour)
+				self.artist_list_icon.render(wwx + 48 * gui.scale, yy + 8 * gui.scale, colour)
 			elif prefs.left_panel_mode == "folder view":
-				self.folder_list_icon.render(wwx + 14 * gui.scale, yy + 8 * gui.scale, colour)
+				self.folder_list_icon.render(wwx + 49 * gui.scale, yy + 8 * gui.scale, colour)
 			else:
-				self.playlist_icon.render(wwx + 13 * gui.scale, yy + 8 * gui.scale, colour)
+				self.playlist_icon.render(wwx + 48 * gui.scale, yy + 8 * gui.scale, colour)
 
 		if not prefs.shuffle_lock and not gui.custom_mode:
-			# Corner layout/edit-menu button, in the slot after the panel button.
-			# Same dim styling as the panel button; opens the layout menu.
-			lrect = (wwx + 45 * gui.scale, yy + 4 * gui.scale, 34 * gui.scale, 25 * gui.scale)
+			# Corner layout/edit-menu button, in the first slot (before the panel
+			# button). Same dim styling; active colour while its menu is open;
+			# opens the layout menu.
+			lrect = (wwx + 9 * gui.scale, yy + 3 * gui.scale, 34 * gui.scale, 25 * gui.scale)
 			self.fields.add(lrect)
 			if self.coll(lrect) and inp.mouse_click:
 				inp.mouse_click = False
 				self.tauon.layout_menu.activate(position=(lrect[0], lrect[1] + lrect[3]))
+			lcol = colours.corner_button_active if self.tauon.layout_menu.active else colours.corner_button
 			gw = round(18 * gui.scale)
 			gh = round(13 * gui.scale)
 			draw_layout_glyph(
 				ddt, gui.scale,
 				lrect[0] + round((lrect[2] - gw) / 2), lrect[1] + round((lrect[3] - gh) / 2),
-				gw, gh, colours.corner_button)
+				gw, gh, lcol)
 
 		# if prefs.artist_list:
 		#     self.artist_list_icon.render(13 * gui.scale, yy + 8 * gui.scale, colour)
@@ -31054,9 +31058,9 @@ class TopPanel:
 
 		x = self.start_space_left + wwx
 		if not prefs.shuffle_lock and not gui.custom_mode:
-			# The corner layout/edit-menu button occupies a second slot after the
-			# panel button; start the tab strip after it.
-			x += round(36 * gui.scale)
+			# The corner holds two buttons (layout/edit menu, then the panel
+			# button); start the tab strip after the second slot.
+			x += round(35 * gui.scale)
 		y = yy  # self.ty
 
 		# Calculate position for playing text and text

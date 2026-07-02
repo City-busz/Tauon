@@ -2192,7 +2192,7 @@ class CustomLayout:
 					wwx += 33
 			wwx = round(wwx * scale)
 		yy = gui.panelY - gui.panelY2
-		return (round(wwx + 9 * scale), round(yy + 4 * scale), round(34 * scale), round(25 * scale))
+		return (round(wwx + 9 * scale), round(yy + 3 * scale), round(34 * scale), round(25 * scale))
 
 	def _corner_button_hit(self, mx: float, my: float) -> bool:
 		if not self.gui.custom_mode:
@@ -2207,8 +2207,10 @@ class CustomLayout:
 		x, y, w, h = self._corner_rect()
 		# Match the standard corner panel-switcher button it replaces: the same
 		# dimmed corner_button colour, corner_button_active while edit mode is
-		# on, and no background or hover treatment.
-		col = colours.corner_button_active if gui.custom_edit else colours.corner_button
+		# on or the layout menu is open, and no background or hover treatment.
+		menu = getattr(self.tauon, "layout_menu", None)
+		active = gui.custom_edit or (menu is not None and menu.active)
+		col = colours.corner_button_active if active else colours.corner_button
 		# Same 3-panel layout glyph as the View Switcher icon, just smaller.
 		gw = round(18 * gui.scale)
 		gh = round(13 * gui.scale)
