@@ -41897,7 +41897,7 @@ class ViewBox:
 		self.x: int = 0
 		self.y = tauon.gui.panelY
 		self.w = 52 * tauon.gui.scale
-		self.h = 305 * tauon.gui.scale  # extended for the Custom Layout option
+		self.h = 260 * tauon.gui.scale  # sized for the option list (incl. Custom Layout)
 		self.active: bool = False
 
 		self.border = 3 * tauon.gui.scale
@@ -41911,7 +41911,6 @@ class ViewBox:
 		#self.editor_img   = asset_loader(tauon.bag, tauon.bag.loaded_asset_dc, "lyrics-editor.png", True)
 		self.gallery2_img = asset_loader(tauon.bag, tauon.bag.loaded_asset_dc, "gallery2.png", True)
 		self.radio_img    = asset_loader(tauon.bag, tauon.bag.loaded_asset_dc, "radio.png", True)
-		self.col_img      = asset_loader(tauon.bag, tauon.bag.loaded_asset_dc, "col.png", True)
 		self.custom_img   = DrawnIcon(tauon, 30, 19, _draw_custom_layout_icon)
 		# self.artist_img = asset_loader(tauon.bag, tauon.bag.loaded_asset_dc, "artist.png", True)
 
@@ -41924,7 +41923,6 @@ class ViewBox:
 		self.lyrics_colour     = ColourPulse2(tauon=tauon)  # (0.7)
 		self.editor_colour     = ColourPulse2(tauon=tauon)  # (0.7)
 		# self.gallery2_colour = ColourPulse(0.65)
-		self.col_colour        = ColourPulse2(tauon=tauon)  # (0.14)
 		self.custom_colour     = ColourPulse2(tauon=tauon)
 		self.artist_colour     = ColourPulse2(tauon=tauon)  # (0.2)
 
@@ -41951,7 +41949,6 @@ class ViewBox:
 		# self.combo_colour.out_timer.force_set(10)
 		self.lyrics_colour.out_timer.force_set(10)
 		# self.gallery2_colour.out_timer.force_set(10)
-		self.col_colour.out_timer.force_set(10)
 		self.artist_colour.out_timer.force_set(10)
 
 		self.tracks_colour.active = False
@@ -41961,7 +41958,6 @@ class ViewBox:
 		# self.combo_colour.active = False
 		self.lyrics_colour.active = False
 		# self.gallery2_colour.active = False
-		self.col_colour.active = False
 		self.artist_colour.active = False
 
 		self.col_force_off = False
@@ -41979,9 +41975,8 @@ class ViewBox:
 		"""
 		on = test()
 		# In custom mode the Custom Layout button is the active "view"; the other
-		# layout icons shouldn't stay highlighted (the columns toggle keeps its
-		# own state).
-		if self.gui.custom_mode and test not in (self.custom_layout, self.col):
+		# layout icons shouldn't stay highlighted.
+		if self.gui.custom_mode and test is not self.custom_layout:
 			on = False
 		rect = [
 			x - 8 * self.gui.scale,
@@ -42290,18 +42285,6 @@ class ViewBox:
 
 		# --
 
-		y += 45 * gui.scale
-
-		high = ColourRGBA(229, 205, 76, 255)
-		if colours.lm:
-			# high = (.9, .75, .65)
-			high = ColourRGBA(63, 63, 63, 255)
-
-		test = self.button(
-			x + 5 * gui.scale, y, self.col_img, self.col, self.col_colour, _("Toggle columns"), False, low=low, high=high)
-		if test is not None:
-			func = test
-
 		# -- Custom Layout --
 
 		y += 45 * gui.scale
@@ -42317,9 +42300,9 @@ class ViewBox:
 			func = test
 
 		if func is not None:
-			# Switching to any other layout exits custom mode. The columns toggle
-			# doesn't change the layout, and the custom button enters it.
-			if func not in (self.col, self.custom_layout) and gui.custom_mode:
+			# Switching to any other layout exits custom mode (the custom button
+			# itself toggles it).
+			if func is not self.custom_layout and gui.custom_mode:
 				self.tauon.custom.exit_mode()
 			func(True)
 
@@ -49748,6 +49731,20 @@ def main(holder: Holder) -> None:
 
 	track_menu.br()
 	track_menu.add(MenuItem(_("Transcode Folder"), tauon.convert_folder, tauon.transcode_deco, pass_ref=True, icon=gui.transcode_icon))
+
+	# Columns toggle (moved here from the View Switcher; the ViewBox.col method
+	# stays as the shared implementation — the toggle-columns keybind uses it too).
+	def menu_toggle_columns(ref=None) -> None:
+		tauon.view_box.col(True)
+
+	def _columns_off_test(ref=None) -> bool:
+		return not gui.set_mode
+
+	def _columns_on_test(ref=None) -> bool:
+		return gui.set_mode
+
+	track_menu.add(MenuItem(_("Show Columns"), menu_toggle_columns, show_test=_columns_off_test))
+	track_menu.add(MenuItem(_("Hide Columns"), menu_toggle_columns, show_test=_columns_on_test))
 
 
 	# Create top menu
