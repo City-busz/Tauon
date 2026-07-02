@@ -14,8 +14,8 @@ Implemented here:
 * Edit mode: hover highlight, right-click context menu (Add stack / Add widget /
   Remove / Remove Stack / Lock V/H/Aspect / Gutter / Border / Load Template),
   edge-drag resizing with weight/pixel semantics and resize cursors.
-* Validation: a stack must keep at least one child scalable on its axis
-  (rejected with an error toast), and single-instance widgets are gated.
+* Validation: single-instance widgets are gated. A row/column may be fully
+  locked; leftover space along the axis stays background.
 * Offscreen render-to-rect compositing (shared ``gui.tracklist_texture`` scratch
   target, clipped blit onto the frame), plus the "Size too small" fallback.
 * A widget registry of adapters over the real panel renderers (every entry is
@@ -81,6 +81,8 @@ class Widget:
 	min_h: int = 30
 	single_instance: bool = False
 	draws_window_controls: bool = False
+	# Show the name tag in the edit-mode overlay (the fixed chrome bars opt out).
+	edit_label: bool = True
 	# When True the engine routes the widget through the offscreen scratch
 	# texture before compositing (for widgets that may draw out of bounds).
 	offscreen: bool = True
@@ -238,6 +240,7 @@ class TopPanelWidget(Widget):
 	min_h = 20
 	single_instance = True
 	draws_window_controls = True
+	edit_label = False
 	offscreen = True
 
 	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
@@ -267,9 +270,13 @@ class PlaybackPanelWidget(Widget):
 	min_w = 120
 	min_h = 30
 	single_instance = True
+	edit_label = False
 	offscreen = True
 
 	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
+		# The standard path sets this before rendering the bar; the bar's text
+		# blends against it, so a stale colour from another widget bleeds through.
+		tauon.ddt.text_background_colour = tauon.colours.bottom_panel_colour
 		bar = tauon.bottom_bar_ao1 if tauon.prefs.shuffle_lock else tauon.bottom_bar1
 		bar.update()
 		bar.render()
@@ -320,6 +327,20 @@ class FolderNavWidget(RectPanelWidget):
 	name = "Folder Navigator"
 	panel_attr = "tree_view_box"
 	panel_method = "render"
+
+
+class ArtistInfoWidget(RectPanelWidget):
+	# The artist bio panel (ArtistInfoBox: picture + last.fm bio + link pins).
+	# panel_mode=False disables the standard panel's self-management (the
+	# bio-pref auto-shrink and the too-narrow auto-close) — the engine's min_w
+	# gate handles small segments instead.
+	kind = "artist_info"
+	name = "Artist Info"
+	min_w = 300
+	min_h = 60
+
+	def draw(self, tauon: Tauon, x: float, y: float, w: float, h: float) -> None:
+		tauon.artist_info_box.draw(round(x), round(y), round(w), round(h), panel_mode=False)
 
 
 class MetaWidget(Widget):
@@ -638,6 +659,10 @@ def _folder_nav(spec: WidgetSpec) -> Widget:
 	return FolderNavWidget()
 
 
+def _artist_info(spec: WidgetSpec) -> Widget:
+	return ArtistInfoWidget()
+
+
 def _tracklist(spec: WidgetSpec) -> Widget:
 	return TracklistWidget()
 
@@ -686,6 +711,8 @@ WIDGET_SPECS: list[WidgetSpec] = [
 	WidgetSpec("meta_center", "Track: Titles", "Content", _meta_center, colour=ColourRGBA(30, 30, 34, 255)),
 	WidgetSpec("meta_centered", "Track: Centered", "Content", _meta_centered, colour=ColourRGBA(30, 31, 35, 255)),
 	WidgetSpec("details", "Track: Details", "Content", _details, colour=ColourRGBA(28, 30, 36, 255)),
+	WidgetSpec("artist_info", "Artist Info", "Content", _artist_info, single_instance=True,
+		colour=ColourRGBA(30, 28, 34, 255)),
 	WidgetSpec("milkdrop", "MilkDrop Box", "Visualizers", _milkdrop,
 		single_instance=True, colour=ColourRGBA(18, 18, 28, 255)),
 	WidgetSpec("playback_panel", "Playback Panel", "Panels", _playback_panel,
@@ -833,7 +860,9 @@ def layout(node: Node, x: float, y: float, w: float, h: float, scale: float,
 		consumed: frozenset[str] = frozenset()) -> None:
 	"""Assign rects to ``node`` and its descendants. Locked children take fixed
 	(scaled) pixels along the parent's axis; the remainder splits by weight; the
-	cross axis fills. Gutter insets each child's allotted slot; where the
+	cross axis fills. Locks only steer this distribution — they never inset or
+	clamp drawing (a lock on the cross axis is applied to the ancestor whose
+	parent divides that axis; see CustomLayout._lock_target). Gutter insets each child's allotted slot; where the
 	subtrees on BOTH sides of an internal boundary are guttered at their facing
 	edges (per _eff_edge, so this works across nesting levels — e.g. a leaf
 	beside a stack of guttered leaves) they share the gutter: each side insets
@@ -950,17 +979,6 @@ def count_kind(root: Node, kind: str) -> int:
 	return sum(1 for leaf in iter_leaves(root) if isinstance(leaf, Leaf) and leaf.kind == kind)
 
 
-
-
-def stack_has_flex_axis(stack: Stack) -> bool:
-	"""True if at least one child is scalable along the stack's axis."""
-	axis = stack.orient
-	for c in stack.children:
-		if axis == "v" and not c.lock_v:
-			return True
-		if axis == "h" and not c.lock_h:
-			return True
-	return False
 
 
 # ---------------------------------------------------------------------------
@@ -1135,15 +1153,8 @@ class CustomLayout:
 		if not isinstance(target, Leaf):
 			return False
 		was_empty = target.widget is None
-		old = (target.widget, target.lock_v, target.lock_h, target.fixed_w, target.fixed_h)
 		target.widget = spec.make()
 		target._adopt(target.widget)
-		# Validate that adding (with any auto-lock) didn't fully lock a parent axis.
-		parent = find_parent(root, target)
-		if parent is not None and not stack_has_flex_axis(parent):
-			target.widget, target.lock_v, target.lock_h, target.fixed_w, target.fixed_h = old
-			self.tauon.show_message(_t("Can't add: every panel in this row/column would be locked"), mode="warning")
-			return False
 		if was_empty:
 			# Fresh add: apply the widget defaults — except fixed-size
 			# (locked-axis) widgets like the Top / Playback panels, which get no
@@ -1183,33 +1194,50 @@ class CustomLayout:
 		grand.children[grand.children.index(parent)] = new
 		self.save_slots()
 
+	def _lock_target(self, root: Node, target: Node, axis: str) -> Node | None:
+		"""The node a v/h lock controls: the nearest node on the path from
+		``target`` up to the root whose parent stack divides space along
+		``axis``. A lock anywhere deeper would sit on a filled cross axis and
+		do nothing. None when no ancestor stack divides that axis."""
+		node = target
+		while True:
+			parent = find_parent(root, node)
+			if parent is None:
+				return None
+			if parent.orient == axis:
+				return node
+			node = parent
+
 	def act_set_lock(self, target: Node, axis: str) -> None:
+		"""Toggle a v/h size lock. Locks only steer how window-resize deltas
+		are distributed: the locked node (the segment, or the container stack
+		that actually divides that axis — see _lock_target) keeps its pixel
+		size while unlocked siblings scale. Drawing, margins and insets are
+		never affected. A row/column may end up fully locked: layout then
+		leaves the leftover space as background rather than stretching
+		anything. Aspect ("Lock Square") stays per-segment and does affect
+		how the widget draws."""
 		root = self.ensure_slot()
-		if axis == "v":
-			new = not target.lock_v
-			if new:
-				# Slot size, not the gutter-inset content size — fixed_h/w are
-				# slot lengths in the layout pass (the gutter insets within).
-				target.fixed_h = max(1, round(target.slot_rect[3] / self.gui.scale))
-			target.lock_v = new
-		elif axis == "h":
-			new = not target.lock_h
-			if new:
-				target.fixed_w = max(1, round(target.slot_rect[2] / self.gui.scale))
-			target.lock_h = new
-		else:  # aspect
+		if axis == "a":  # aspect
 			target.aspect = not target.aspect
 			self.save_slots()
 			return
-		parent = find_parent(root, target)
-		if parent is not None and not stack_has_flex_axis(parent):
-			# Revert — would fully lock the stack's axis.
-			if axis == "v":
-				target.lock_v = False
-			else:
-				target.lock_h = False
-			self.tauon.show_message(_t("Can't lock: every panel in this row/column would be locked"), mode="warning")
+		node = self._lock_target(root, target, axis)
+		if node is None:
+			self.tauon.show_message(_t("Can't lock: nothing divides the layout in that direction"), mode="warning")
 			return
+		if axis == "v":
+			new = not node.lock_v
+			if new:
+				# Slot size, not the gutter-inset content size — fixed_h/w are
+				# slot lengths in the layout pass (the gutter insets within).
+				node.fixed_h = max(1, round(node.slot_rect[3] / self.gui.scale))
+			node.lock_v = new
+		else:
+			new = not node.lock_h
+			if new:
+				node.fixed_w = max(1, round(node.slot_rect[2] / self.gui.scale))
+			node.lock_h = new
 		self.save_slots()
 
 	def act_set_gutter(self, target: Node, px: int) -> None:
@@ -1510,17 +1538,31 @@ class CustomLayout:
 	def _t_has_widget(self, ref=None) -> bool:
 		return isinstance(self.menu_target, Leaf) and self.menu_target.widget is not None
 
+	def _resolved_lock_node(self, axis: str) -> Node | None:
+		"""The node the Lock V/H menu items would act on for the current
+		menu_target (see _lock_target)."""
+		if self.menu_target is None:
+			return None
+		root = self.slots[self.active_slot]
+		if root is None:
+			return None
+		return self._lock_target(root, self.menu_target, axis)
+
 	def _t_locked_v(self, ref=None) -> bool:
-		return self.menu_target is not None and self.menu_target.lock_v
+		node = self._resolved_lock_node("v")
+		return node is not None and node.lock_v
 
 	def _t_unlocked_v(self, ref=None) -> bool:
-		return self.menu_target is not None and not self.menu_target.lock_v
+		node = self._resolved_lock_node("v")
+		return node is not None and not node.lock_v
 
 	def _t_locked_h(self, ref=None) -> bool:
-		return self.menu_target is not None and self.menu_target.lock_h
+		node = self._resolved_lock_node("h")
+		return node is not None and node.lock_h
 
 	def _t_unlocked_h(self, ref=None) -> bool:
-		return self.menu_target is not None and not self.menu_target.lock_h
+		node = self._resolved_lock_node("h")
+		return node is not None and not node.lock_h
 
 	def _t_aspect_on(self, ref=None) -> bool:
 		return self.menu_target is not None and self.menu_target.aspect
@@ -1823,7 +1865,7 @@ class CustomLayout:
 		pad = round(6 * scale)
 		tag_h = round(18 * scale)
 		for lf in iter_leaves(root):
-			if lf.widget is None:
+			if lf.widget is None or not lf.widget.edit_label:
 				continue
 			x, y, w, h = lf.rect
 			if w < 50 * scale or h < tag_h + pad * 2:

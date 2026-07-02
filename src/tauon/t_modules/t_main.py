@@ -40057,14 +40057,18 @@ class ArtistInfoBox:
 			shoot_dl.daemon = True
 			shoot_dl.start()
 
-	def draw(self, x: int, y: int, w: int, h: int) -> None:
-		if self.gui.artist_panel_height > 300 * self.gui.scale and w < 500 * self.gui.scale:
-			self.tauon.bio_set_small()
+	def draw(self, x: int, y: int, w: int, h: int, panel_mode: bool = True) -> None:
+		# panel_mode covers the standard artist-info panel's self-management
+		# (auto-shrink the bio pref, auto-close when too narrow); the custom
+		# layout widget passes False — its segment size is user-controlled.
+		if panel_mode:
+			if self.gui.artist_panel_height > 300 * self.gui.scale and w < 500 * self.gui.scale:
+				self.tauon.bio_set_small()
 
-		if w < 300 * self.gui.scale:
-			self.gui.artist_info_panel = False
-			self.gui.update_layout = True
-			return
+			if w < 300 * self.gui.scale:
+				self.gui.artist_info_panel = False
+				self.gui.update_layout = True
+				return
 
 		track = self.pctl.playing_object()
 		if track is None:
@@ -49242,8 +49246,8 @@ def main(holder: Holder) -> None:
 		cl_menu.add(MenuItem(_("Unlock Vertical"), cm._menu_lock_v, show_test=cm._t_locked_v))
 		cl_menu.add(MenuItem(_("Lock Horizontal"), cm._menu_lock_h, show_test=cm._t_unlocked_h))
 		cl_menu.add(MenuItem(_("Unlock Horizontal"), cm._menu_lock_h, show_test=cm._t_locked_h))
-		cl_menu.add(MenuItem(_("Lock Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_off))
-		cl_menu.add(MenuItem(_("Unlock Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_on))
+		cl_menu.add(MenuItem(_("Inset Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_off))
+		cl_menu.add(MenuItem(_("Remove Inset Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_on))
 		cl_menu.add_sub(_("Gutter…"), 60)
 		_cl_sub_g = cl_menu.sub_number - 1
 		for _g in CL_GUTTER_OPTIONS:
@@ -53992,7 +53996,7 @@ def main(holder: Holder) -> None:
 							)
 							draw_sep_hl = False
 
-				if (gui.artist_info_panel and not gui.combo_mode) and not (
+				if (gui.artist_info_panel and not gui.combo_mode and not gui.custom_mode) and not (
 					window_size[0] < 750 * gui.scale and prefs.album_mode
 				):
 					tauon.artist_info_box.draw(gui.playlist_left, gui.panelY, gui.plw, gui.artist_panel_height)
