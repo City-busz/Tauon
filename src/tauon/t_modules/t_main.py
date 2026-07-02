@@ -31006,7 +31006,8 @@ class TopPanel:
 				colour = colours.corner_button_active
 
 		if not prefs.shuffle_lock and not gui.custom_mode:
-			# In custom mode the layout engine draws an edit-toggle in this corner.
+			# The panel button hides in custom mode (the layout/edit button below
+			# is drawn by the layout engine there instead, in this first slot).
 			if gui.combo_mode:
 				self.return_icon.render(wwx + 14 * gui.scale, yy + 8 * gui.scale, colour)
 			elif prefs.left_panel_mode == "artist list":
@@ -31015,6 +31016,21 @@ class TopPanel:
 				self.folder_list_icon.render(wwx + 14 * gui.scale, yy + 8 * gui.scale, colour)
 			else:
 				self.playlist_icon.render(wwx + 13 * gui.scale, yy + 8 * gui.scale, colour)
+
+		if not prefs.shuffle_lock and not gui.custom_mode:
+			# Corner layout/edit-menu button, in the slot after the panel button.
+			# Same dim styling as the panel button; opens the layout menu.
+			lrect = (wwx + 45 * gui.scale, yy + 4 * gui.scale, 34 * gui.scale, 25 * gui.scale)
+			self.fields.add(lrect)
+			if self.coll(lrect) and inp.mouse_click:
+				inp.mouse_click = False
+				self.tauon.layout_menu.activate(position=(lrect[0], lrect[1] + lrect[3]))
+			gw = round(18 * gui.scale)
+			gh = round(13 * gui.scale)
+			draw_layout_glyph(
+				ddt, gui.scale,
+				lrect[0] + round((lrect[2] - gw) / 2), lrect[1] + round((lrect[3] - gh) / 2),
+				gw, gh, colours.corner_button)
 
 		# if prefs.artist_list:
 		#     self.artist_list_icon.render(13 * gui.scale, yy + 8 * gui.scale, colour)
@@ -31037,6 +31053,10 @@ class TopPanel:
 				self.tab_text_spaces.append(le)
 
 		x = self.start_space_left + wwx
+		if not prefs.shuffle_lock and not gui.custom_mode:
+			# The corner layout/edit-menu button occupies a second slot after the
+			# panel button; start the tab strip after it.
+			x += round(36 * gui.scale)
 		y = yy  # self.ty
 
 		# Calculate position for playing text and text
@@ -49264,6 +49284,35 @@ def main(holder: Holder) -> None:
 		_cl_sub_t = cl_menu.sub_number - 1
 		for _name in CL_TEMPLATES:
 			cl_menu.add_to_sub(_cl_sub_t, MenuItem(_name, cm._menu_template, args=_name))
+
+	# Corner layout menu: opened by the corner layout/edit button (drawn after
+	# the panel button by the TopPanel normally; by the custom engine while in
+	# custom mode, where the panel button is hidden). Mirrors the View Switcher
+	# options (same labels as its tooltips), plus the custom-layout edit toggle.
+	layout_menu = Menu(tauon, 150)
+	tauon.layout_menu = layout_menu
+
+	def _layout_menu_pick(name: str) -> Callable[[], None]:
+		def cb() -> None:
+			# Same dispatch as the View Switcher buttons: any option other than
+			# Custom Layout exits custom mode first.
+			if name != "custom_layout" and gui.custom_mode:
+				tauon.custom.exit_mode()
+			getattr(tauon.view_box, name)(True)
+		return cb
+
+	for _vb_name, _vb_label in (
+		("side", _("Tracks + Art")),
+		("gallery1", _("Gallery")),
+		("tracks", _("Tracks only")),
+		("lyrics", _("Showcase + Lyrics")),
+		("radio", _("Radio")),
+		("custom_layout", _("Custom Layout")),
+	):
+		layout_menu.add(MenuItem(_vb_label, _layout_menu_pick(_vb_name)))
+	layout_menu.br()
+	layout_menu.add(MenuItem(_("Toggle Edit Mode"), tauon.custom.toggle_edit,
+		disable_test=lambda: not gui.custom_mode))
 
 	# Right-click menu for the Spectrogram widget: colour presets.
 	spectrogram_menu = Menu(tauon, 150)

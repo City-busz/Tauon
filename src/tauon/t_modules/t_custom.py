@@ -1684,10 +1684,14 @@ class CustomLayout:
 		if Menu.active or gui.message_box:
 			return
 
-		# Corner edit-toggle button — clickable in BOTH view and edit mode, so it
-		# can turn edit mode on and off. Handled before everything else.
+		# Corner layout/edit button — clickable in BOTH view and edit mode; opens
+		# the shared layout menu (view options + edit-mode toggle). Handled
+		# before everything else.
 		if inp.mouse_click and self._corner_button_hit(inp.mouse_position[0], inp.mouse_position[1]):
-			self.toggle_edit()
+			menu = getattr(self.tauon, "layout_menu", None)
+			if menu is not None:
+				x, y, w, h = self._corner_rect()
+				menu.activate(position=[x, y + h])
 			self._consume(inp)
 			return
 
