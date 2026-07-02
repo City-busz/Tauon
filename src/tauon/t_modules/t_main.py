@@ -49266,6 +49266,8 @@ def main(holder: Holder) -> None:
 		cl_menu.add(MenuItem(_("Unlock Horizontal"), cm._menu_lock_h, show_test=cm._t_locked_h))
 		cl_menu.add(MenuItem(_("Inset Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_off))
 		cl_menu.add(MenuItem(_("Remove Inset Square"), cm._menu_lock_aspect, show_test=cm._t_aspect_on))
+		cl_menu.add(MenuItem(_("Square Max"), cm._menu_square_max, show_test=cm._t_square_off))
+		cl_menu.add(MenuItem(_("Remove Square Max"), cm._menu_square_max, show_test=cm._t_square_on))
 		cl_menu.add_sub(_("Gutter…"), 60)
 		_cl_sub_g = cl_menu.sub_number - 1
 		for _g in CL_GUTTER_OPTIONS:

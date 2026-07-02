@@ -9,8 +9,10 @@ Implemented here:
 
 * Layout tree (``Stack`` / ``Leaf``) of arbitrary nesting depth, with empty
   leaves, per-node gutter/border, per-axis pixel locks and an aspect lock.
-* The resize / layout pass: locked children take fixed (scaled) pixels, the rest
-  split the remainder by ``weight``; the cross axis fills.
+* The resize / layout pass: locked children take fixed (scaled) pixels, Square
+  Max children take up to the stack's cross extent (so their slot is square,
+  yielding so siblings keep their minimum sizes), the rest split the remainder
+  by ``weight``; the cross axis fills.
 * Edit mode: hover highlight, right-click context menu (Add stack / Add widget /
   Remove / Remove Stack / Lock V/H/Aspect / Gutter / Border / Load Template),
   edge-drag resizing with weight/pixel semantics and resize cursors.
@@ -1041,6 +1043,7 @@ class Node:
 		self.fixed_w: int = 0
 		self.fixed_h: int = 0
 		self.aspect: bool = False          # keep widget content aspect on draw
+		self.square: bool = False          # Square Max: take the parent-axis length that makes the slot square
 		self.gutter: int = 0               # inset around content, px (unscaled)
 		self.border: bool = False
 		self.rect: tuple[float, float, float, float] = (0, 0, 0, 0)
@@ -1054,6 +1057,7 @@ class Node:
 		return {
 			"weight": self.weight, "lock_v": self.lock_v, "lock_h": self.lock_h,
 			"fixed_w": self.fixed_w, "fixed_h": self.fixed_h, "aspect": self.aspect,
+			"square": self.square,
 			"gutter": self.gutter, "border": self.border,
 		}
 
@@ -1064,6 +1068,7 @@ class Node:
 		self.fixed_w = d.get("fixed_w", 0)
 		self.fixed_h = d.get("fixed_h", 0)
 		self.aspect = d.get("aspect", False)
+		self.square = d.get("square", False)
 		self.gutter = d.get("gutter", 0)
 		self.border = d.get("border", False)
 
@@ -1136,6 +1141,25 @@ def _fixed_on(node: Node, axis: str, scale: float) -> float | None:
 	return None
 
 
+def _min_on(node: Node, axis: str, scale: float) -> float:
+	"""Smallest length (scaled px) ``node`` can be squeezed to along ``axis``
+	without pushing a widget below its declared minimum: a locked node needs
+	its fixed px, a widget leaf its ``min_w``/``min_h``, a stack the sum of its
+	children's minimums along its own axis (the max across it). Empty cells
+	collapse to nothing."""
+	f = _fixed_on(node, axis, scale)
+	if f is not None:
+		return f
+	if isinstance(node, Stack):
+		if not node.children:
+			return 0.0
+		mins = [_min_on(c, axis, scale) for c in node.children]
+		return sum(mins) if node.orient == axis else max(mins)
+	if isinstance(node, Leaf) and node.widget is not None:
+		return (node.widget.min_h if axis == "v" else node.widget.min_w) * scale
+	return 0.0
+
+
 def _eff_edge(node: Node, side: str, scale: float) -> float:
 	"""Total natural inset (scaled px) a subtree applies between its slot edge
 	and its content at ``side`` ("l"/"r"/"t"/"b"): the node's own gutter plus
@@ -1178,6 +1202,21 @@ def layout(node: Node, x: float, y: float, w: float, h: float, scale: float,
 	axis = node.orient
 	total = h if axis == "v" else w
 	fixed = [_fixed_on(c, axis, scale) for c in node.children]
+	# Square Max children take the length that makes their slot square (the
+	# stack's cross extent), capped so locked siblings keep their px and the
+	# remaining flex siblings can still reach their minimum sizes. They then
+	# behave like locked children for the weight split below.
+	squares = [i for i, (c, f) in enumerate(zip(node.children, fixed)) if f is None and c.square]
+	if squares:
+		cross = w if axis == "v" else h
+		others_min = sum(
+			_min_on(c, axis, scale)
+			for i, (c, f) in enumerate(zip(node.children, fixed))
+			if f is None and i not in squares)
+		cap = max(0.0, total - sum(f for f in fixed if f is not None) - others_min)
+		grant = max(0.0, min(cross, cap / len(squares)))
+		for i in squares:
+			fixed[i] = grant
 	locked_total = sum(f for f in fixed if f is not None)
 	flex = [c for c, f in zip(node.children, fixed) if f is None]
 	weight_total = sum(c.weight for c in flex) or 1.0
@@ -1470,6 +1509,7 @@ class CustomLayout:
 			target.widget = None
 			target.lock_v = target.lock_h = False
 			target.aspect = False
+			target.square = False
 			self.save_slots()
 
 	def act_remove_stack(self, target: Node) -> None:
@@ -1541,6 +1581,14 @@ class CustomLayout:
 			node.lock_h = new
 		self.save_slots()
 
+	def act_toggle_square(self, target: Node) -> None:
+		"""Toggle Square Max: instead of a weight share, the segment takes as
+		much of its parent stack as makes its slot square (parent-axis length =
+		cross extent), yielding only so locked siblings keep their px and other
+		widgets keep their minimum sizes."""
+		target.square = not target.square
+		self.save_slots()
+
 	def act_set_gutter(self, target: Node, px: int) -> None:
 		target.gutter = px
 		self.save_slots()
@@ -1561,6 +1609,7 @@ class CustomLayout:
 		a.fixed_w, b.fixed_w = b.fixed_w, a.fixed_w
 		a.fixed_h, b.fixed_h = b.fixed_h, a.fixed_h
 		a.aspect, b.aspect = b.aspect, a.aspect
+		a.square, b.square = b.square, a.square
 		self.save_slots()
 
 	def act_load_template(self, name: str) -> None:
@@ -1818,6 +1867,10 @@ class CustomLayout:
 		if self.menu_target is not None:
 			self.act_set_lock(self.menu_target, "a")
 
+	def _menu_square_max(self) -> None:
+		if self.menu_target is not None:
+			self.act_toggle_square(self.menu_target)
+
 	def _menu_border(self) -> None:
 		if self.menu_target is not None:
 			self.act_toggle_border(self.menu_target)
@@ -1870,6 +1923,12 @@ class CustomLayout:
 
 	def _t_aspect_off(self, ref=None) -> bool:
 		return self.menu_target is not None and not self.menu_target.aspect
+
+	def _t_square_on(self, ref=None) -> bool:
+		return self.menu_target is not None and self.menu_target.square
+
+	def _t_square_off(self, ref=None) -> bool:
+		return self.menu_target is not None and not self.menu_target.square
 
 	def _t_border_on(self, ref=None) -> bool:
 		return self.menu_target is not None and self.menu_target.border
