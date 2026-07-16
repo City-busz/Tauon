@@ -99,7 +99,7 @@ import requests
 import sdl3
 from bs4 import BeautifulSoup
 from mutagen.easyid3 import EasyID3
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
 from send2trash import send2trash
 from unidecode import unidecode
 
@@ -945,6 +945,11 @@ class GuiVar:
 		self.max_window_tex = max_window_tex # Both X and Y of maximal Tauon window texture size
 		self.main_texture = main_texture
 		self.main_texture_overlay_temp = main_texture_overlay_temp
+
+		# True while the current frame has the album-art background drawn
+		# underneath the UI; panels must blend over it rather than clearing
+		# or replacing their region's pixels
+		self.have_art_bg: bool = False
 
 		self.preview_artist: str = ""
 		self.preview_artist_location = (0, 0)
@@ -14404,6 +14409,32 @@ class Tauon:
 		else:
 			prefs.art_bg_opacity = 10
 
+		# The art background draws underneath the UI, so panel fills are made
+		# translucent to let it show through; strength maps to panel alpha
+		colours = self.colours
+		panel_colour_names = (
+			"playlist_panel_background",
+			"side_panel_background",
+			"top_panel_background",
+			"bottom_panel_colour",
+			"gallery_background",
+			"queue_background",
+			"playlist_box_background",
+			"lyrics_panel_background",
+		)
+		panel_colours = [c for c in (getattr(colours, name, None) for name in panel_colour_names) if c is not None]
+		# Menus draw over other UI and must stay readable; de-alias if the
+		# theme shares an object with a panel colour before changing alphas
+		if colours.menu_background is not None and any(colours.menu_background is c for c in panel_colours):
+			mb = colours.menu_background
+			colours.menu_background = ColourRGBA(mb.r, mb.g, mb.b, mb.a)
+
+		panel_alpha = 255
+		if prefs.art_bg:
+			panel_alpha = max(120, 255 - prefs.art_bg_opacity * 3)
+		for colour in panel_colours:
+			colour.a = panel_alpha
+
 		# -----
 
 		# Adjust for for compact window sizes ----
@@ -14750,7 +14781,9 @@ class Tauon:
 				sdl3.SDL_SetRenderTarget(renderer, gui.tracklist_texture)
 				sdl3.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0)
 				sdl3.SDL_RenderClear(renderer)
-				sdl3.SDL_SetTextureBlendMode(gui.tracklist_texture, sdl3.SDL_BLENDMODE_BLEND)
+				# Premultiplied src-over: the texture holds premultiplied
+				# content (see creation site in main())
+				sdl3.SDL_SetTextureBlendMode(gui.tracklist_texture, self.ddt.text_blend_mode)
 
 				# sdl3.SDL_SetRenderTarget(renderer, gui.main_texture)
 				# sdl3.SDL_RenderClear(renderer)
@@ -19271,6 +19304,7 @@ class Tauon:
 			_pcols["pl_st_left"],  # 192
 			prefs.milk_cut_out,  # 193
 			prefs.milk_favorite_presets,  # 194
+			prefs.art_bg_frosted,  # 195
 		]
 
 		try:
@@ -19698,6 +19732,7 @@ class Tauon:
 		if mode == 1:
 			return self.prefs.art_bg
 		self.prefs.art_bg ^= True
+		self.gui.update_layout = True  # Applies/removes panel translucency
 
 		if self.prefs.art_bg:
 			self.gui.request_frame()
@@ -19748,6 +19783,14 @@ class Tauon:
 		if mode == 1:
 			return self.prefs.art_bg_always_blur
 		self.prefs.art_bg_always_blur ^= True
+		self.style_overlay.flush()
+		self.thread_manager.ready("style")
+		return None
+
+	def toggle_auto_bg_frosted(self, mode: int = 0) -> bool | None:
+		if mode == 1:
+			return self.prefs.art_bg_frosted
+		self.prefs.art_bg_frosted ^= True
 		self.style_overlay.flush()
 		self.thread_manager.ready("style")
 		return None
@@ -23002,8 +23045,12 @@ class AlbumArt:
 			if artist and artist in self.prefs.bg_flips:
 				im = im.transpose(Image.FLIP_LEFT_RIGHT)
 
-		if (ox_size < 500 or self.prefs.art_bg_always_blur) or self.gui.mode == GuiMode.MINI:
+		frosted = self.prefs.art_bg_frosted and self.gui.mode != GuiMode.MINI
+
+		if (ox_size < 500 or self.prefs.art_bg_always_blur) or self.gui.mode == GuiMode.MINI or frosted:
 			blur = self.prefs.art_bg_blur
+			if frosted:
+				blur = max(blur, 60)
 			if self.prefs.mini_mode_mode == MiniModeMode.SLATE and self.gui.mode == GuiMode.MINI:
 				blur = 160
 				pix = im.getpixel((new_x // 2, new_y // 4 * 3))
@@ -23017,6 +23064,15 @@ class AlbumArt:
 				self.gui.center_blur_pixel = im.getpixel((new_x // 2, new_y // 4 * 3))
 
 			im = im.filter(ImageFilter.GaussianBlur(blur))
+
+		if frosted:
+			# Frosted glass / sandblasted: mute the colour, then add fine
+			# monochrome grain (noise is mean-128, so adding with -128 offset
+			# leaves brightness unchanged)
+			im = ImageEnhance.Color(im).enhance(0.7)
+			grain = Image.effect_noise(im.size, 10).convert("L")
+			grain = Image.merge("RGB", (grain, grain, grain))
+			im = ImageChops.add(im, grain, 1.0, -128)
 
 
 		self.gui.center_blur_pixel = im.getpixel((new_x // 2, new_y // 2))
@@ -23775,7 +23831,16 @@ class StyleOverlay:
 		self.gui.delay_frame(0.25)
 		self.gui.request_frame()
 
-	def display(self) -> None:
+	def display(self, background: bool = False) -> None:
+		if background:
+			# True-background mode: draw an opaque base directly onto the
+			# current render target at the start of the frame; the art fades
+			# in over it and the UI (translucent panels, text) draws on top.
+			base = self.tauon.colours.playlist_panel_background
+			self.ddt.rect(
+				(0, 0, self.window_size[0], self.window_size[1]),
+				ColourRGBA(base.r, base.g, base.b, 255))
+
 		if self.min_on_timer.get() < 0:
 			return
 
@@ -23837,9 +23902,10 @@ class StyleOverlay:
 			pass
 
 		t = self.fade_on_timer.get()
-		sdl3.SDL_SetRenderTarget(self.renderer, self.gui.main_texture_overlay_temp)
-		sdl3.SDL_SetRenderDrawColor(self.renderer, 0, 0, 0, 255)
-		sdl3.SDL_RenderClear(self.renderer)
+		if not background:
+			sdl3.SDL_SetRenderTarget(self.renderer, self.gui.main_texture_overlay_temp)
+			sdl3.SDL_SetRenderDrawColor(self.renderer, 0, 0, 0, 255)
+			sdl3.SDL_RenderClear(self.renderer)
 
 		if self.a_texture is not None and self.window_size_int != self.window_size:
 			self.flush()
@@ -23851,7 +23917,10 @@ class StyleOverlay:
 				self.b_rect.y = 0
 
 			if t < 0.4:
-
+				if background:
+					# The alpha mod may be left over from when this was the
+					# fading-in front texture
+					sdl3.SDL_SetTextureAlphaMod(self.b_texture, 255)
 				sdl3.SDL_RenderTexture(self.renderer, self.b_texture, None, self.b_rect)
 
 			else:
@@ -23891,6 +23960,15 @@ class StyleOverlay:
 			else:
 				self.a_rect.x = -40
 
+			if background:
+				# Drawn straight onto the frame background; panel translucency
+				# (set in update_layout_do) controls how strongly it shows
+				# through, so no whole-window opacity pass or hole punching
+				# is needed.
+				sdl3.SDL_SetTextureAlphaMod(self.a_texture, fade)
+				sdl3.SDL_RenderTexture(self.renderer, self.a_texture, None, self.a_rect)
+				return
+
 			sdl3.SDL_SetRenderTarget(self.renderer, self.gui.main_texture_overlay_temp)
 
 			sdl3.SDL_SetTextureAlphaMod(self.a_texture, fade)
@@ -23914,7 +23992,7 @@ class StyleOverlay:
 
 			sdl3.SDL_SetRenderTarget(self.renderer, self.gui.main_texture)
 
-		else:
+		elif not background:
 			sdl3.SDL_SetRenderTarget(self.renderer, self.gui.main_texture)
 
 class ToolTip:
@@ -28866,7 +28944,7 @@ class Over:
 		preset_columns = max(1, min(theme_count, (right_inner_w + preset_gap) // max(preset_w + preset_gap, 1)))
 		preset_rows = max(1, math.ceil(theme_count / preset_columns))
 		preset_grid_h = preset_rows * preset_h + max(0, preset_rows - 1) * preset_gap
-		left_min_h = round(80 * gui.scale) + row_h * 5 + row_gap * 4
+		left_min_h = round(80 * gui.scale) + row_h * 6 + row_gap * 5
 		right_min_h = round(132 * gui.scale) + preset_grid_h + row_gap * 3 + action_h + row_h
 		card_h = max(left_min_h, right_min_h)
 		left_rect = (x, y, left_w, card_h)
@@ -28894,6 +28972,8 @@ class Over:
 		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_bg_strong, _("Stronger background"), accent=accent)
 		inner_y += row_h + row_gap
 		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_bg_blur, _("Blur background"), accent=accent)
+		inner_y += row_h + row_gap
+		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_bg_frosted, _("Frosted glass look"), accent=accent)
 		inner_y += row_h + row_gap
 		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_theme, _("Auto-theme from album art"), accent=accent)
 
@@ -31272,8 +31352,10 @@ class TopPanel:
 			# gui.pl_update = 1
 			gui.update_on_drag = True
 
-		# Draw the background
-		ddt.clear_rect((0, 0, window_size[0], gui.panelY))
+		# Draw the background (blend over the art background if active,
+		# otherwise clear first so window transparency works)
+		if not gui.have_art_bg:
+			ddt.clear_rect((0, 0, window_size[0], gui.panelY))
 		ddt.rect((0, 0, window_size[0], gui.panelY), colours.top_panel_background)
 
 		if prefs.shuffle_lock and not gui.compact_bar:
@@ -32272,7 +32354,10 @@ class BottomBarType1:
 		colours     = self.colours
 		fonts       = self.tauon.fonts
 
-		sdl3.SDL_SetRenderDrawBlendMode(self.renderer, sdl3.SDL_BLENDMODE_NONE)
+		# Replace pixels (for window transparency) unless the art background
+		# is underneath, in which case blend over it
+		if not self.gui.have_art_bg:
+			sdl3.SDL_SetRenderDrawBlendMode(self.renderer, sdl3.SDL_BLENDMODE_NONE)
 		ddt.rect_a((0, self.window_size[1] - self.gui.panelBY), (self.window_size[0], self.gui.panelBY), colours.bottom_panel_colour)
 		sdl3.SDL_SetRenderDrawBlendMode(self.renderer, sdl3.SDL_BLENDMODE_BLEND)
 
@@ -33116,7 +33201,10 @@ class BottomBarType_ao1:
 
 	def render(self) -> None:
 
-		sdl3.SDL_SetRenderDrawBlendMode(self.renderer, sdl3.SDL_BLENDMODE_NONE)
+		# Replace pixels (for window transparency) unless the art background
+		# is underneath, in which case blend over it
+		if not self.gui.have_art_bg:
+			sdl3.SDL_SetRenderDrawBlendMode(self.renderer, sdl3.SDL_BLENDMODE_NONE)
 		self.ddt.rect_a((0, self.window_size[1] - self.gui.panelBY), (self.window_size[0], self.gui.panelBY), self.colours.bottom_panel_colour)
 		sdl3.SDL_SetRenderDrawBlendMode(self.renderer, sdl3.SDL_BLENDMODE_BLEND)
 
@@ -36315,7 +36403,8 @@ class ArtBox:
 		inp     = self.inp
 
 		# Draw a background for whole area
-		ddt.clear_rect((x, y, w, h))
+		if not gui.have_art_bg:
+			ddt.clear_rect((x, y, w, h))
 		ddt.rect((x, y, w, h), colours.side_panel_background)
 		# ddt.rect_r((x, y, w ,h), [255, 0, 0, 200], True)
 
@@ -40418,7 +40507,8 @@ class MetaBox:
 		# context menu and the "Lyrics" showcase link.
 		bg = self.colours.side_panel_background
 		self.ddt.text_background_colour = bg
-		self.ddt.clear_rect((x, y, w, h))
+		if not self.gui.have_art_bg:
+			self.ddt.clear_rect((x, y, w, h))
 		self.ddt.rect((x, y, w, h), bg)
 
 
@@ -40572,7 +40662,8 @@ class MetaBox:
 		radiobox = self.tauon.radiobox
 		target_track = track
 
-		ddt.clear_rect((x, y, w, h))
+		if not gui.have_art_bg:
+			ddt.clear_rect((x, y, w, h))
 		ddt.rect((x, y, w, h), colours.side_panel_background)
 		small_mode = window_size[1] < 550 * gui.scale
 		text_y = y + round(h * 0.40)
@@ -49208,7 +49299,18 @@ def main(holder: Holder) -> None:
 		renderer, sdl3.SDL_PIXELFORMAT_ARGB8888, sdl3.SDL_TEXTUREACCESS_TARGET, max_window_tex,
 		max_window_tex)
 	tracklist_texture_rect = sdl3.SDL_FRect(0, 0, max_window_tex, max_window_tex)
-	sdl3.SDL_SetTextureBlendMode(tracklist_texture, sdl3.SDL_BLENDMODE_BLEND)
+	# The tracklist texture is built over a transparent clear, so its content
+	# is effectively premultiplied (translucent panel fills, premultiplied
+	# text textures); composite it src-over in premultiplied form —
+	# SDL_BLENDMODE_BLEND would multiply by alpha a second time
+	sdl3.SDL_SetTextureBlendMode(tracklist_texture, sdl3.SDL_ComposeCustomBlendMode(
+		sdl3.SDL_BLENDFACTOR_ONE,
+		sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+		sdl3.SDL_BLENDOPERATION_ADD,
+		sdl3.SDL_BLENDFACTOR_ONE,
+		sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+		sdl3.SDL_BLENDOPERATION_ADD,
+	))
 
 	sdl3.SDL_SetRenderTarget(renderer, None)
 
@@ -50013,6 +50115,8 @@ def main(holder: Holder) -> None:
 				prefs.milk_cut_out = save[193]
 			if len(save) > 194 and save[194] is not None:
 				prefs.milk_favorite_presets = save[194]
+			if len(save) > 195 and save[195] is not None:
+				prefs.art_bg_frosted = save[195]
 
 			del save
 			break
@@ -55342,6 +55446,8 @@ def main(holder: Holder) -> None:
 			# logging.info("Theme number: " + str(prefs.theme))
 			gui.reload_theme = False
 			ddt.text_background_colour = colours.playlist_panel_background
+			# Re-apply art-bg panel translucency to the fresh colour objects
+			gui.update_layout = True
 
 		# ---------------------------------------------------------------------------------------------------------
 		# GUI DRAWING------
@@ -55378,6 +55484,13 @@ def main(holder: Holder) -> None:
 			sdl3.SDL_RenderClear(renderer)
 			sdl3.SDL_SetRenderTarget(renderer, gui.main_texture)
 			sdl3.SDL_RenderClear(renderer)
+
+			# Blurred album art background: drawn first so all panels and
+			# text composite on top of it (panel colours are made translucent
+			# in update_layout_do while this is active)
+			gui.have_art_bg = prefs.art_bg and gui.mode == GuiMode.MAIN
+			if gui.have_art_bg:
+				tauon.style_overlay.display(background=True)
 
 			# tauon.perf_timer.set()
 			gui.update_on_drag = False
@@ -56000,7 +56113,8 @@ def main(holder: Holder) -> None:
 							y = gui.panelY
 							w = gui.rspw
 
-							ddt.clear_rect((x, y, w, h))
+							if not gui.have_art_bg:
+								ddt.clear_rect((x, y, w, h))
 							ddt.rect((x, y, w, h), colours.side_panel_background)
 							tauon.test_auto_lyrics(target_track)
 							# Draw lyrics if available
@@ -56333,14 +56447,8 @@ def main(holder: Holder) -> None:
 				else:
 					tauon.bottom_bar1.render()
 
-				if prefs.art_bg:
-					tauon.style_overlay.display()
-					# if inp.key_shift_down:
-					#     ddt.rect_r(gui.seek_bar_rect,
-					#                alpha_mod([150, 150, 150 ,255], 20), True)
-					#     ddt.rect_r(gui.volume_bar_rect,
-					#                alpha_mod(colours.volume_bar_fill, 100), True)
-
+				# (The blurred art background is now drawn at the start of the
+				# frame, underneath the UI, rather than composited over it here)
 				tauon.style_overlay.hole_punches.clear()
 
 				# Custom Layout System: composite over the standard layout once
