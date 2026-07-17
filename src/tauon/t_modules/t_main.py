@@ -14457,6 +14457,10 @@ class Tauon:
 			element_alpha = 115
 		for colour in panel_colours:
 			colour.a = panel_alpha
+		# At frosted high strength the tracklist gets hard to read over busy
+		# art; keep its panel a touch more opaque than the others
+		if prefs.art_bg and prefs.art_bg_frosted and prefs.art_bg_stronger >= 3:
+			colours.playlist_panel_background.a = min(255, panel_alpha + 20)
 		for colour in element_colours:
 			colour.a = element_alpha
 
