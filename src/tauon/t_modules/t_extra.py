@@ -812,20 +812,16 @@ def hls_pull_contrast(base: ColourRGBA, backdrop: ColourRGBA, floor: float = 0.1
 	Lightness deltas below `knee` are remapped linearly into [floor, knee],
 	so near-collisions become readable while the ordering of related shades
 	(a button's off/over/active states) is preserved rather than all
-	clamping to the same value. Hue, saturation and alpha are kept. Pushes
-	in the direction base already leans; flips if that runs off the end of
-	the lightness range."""
+	clamping to the same value. Hue, saturation and alpha are kept. Only
+	ever lightens — a base darker than the backdrop is pushed up past it,
+	never darkened further."""
 	bh, bl, bs = colorsys.rgb_to_hls(base.r / 255, base.g / 255, base.b / 255)
 	_h, kl, _s = colorsys.rgb_to_hls(backdrop.r / 255, backdrop.g / 255, backdrop.b / 255)
 	delta = abs(bl - kl)
 	if delta >= knee:
 		return base
 	new_delta = floor + delta * (knee - floor) / knee
-	direction = 1.0 if bl >= kl else -1.0
-	nl = kl + new_delta * direction
-	if not 0.0 <= nl <= 1.0:
-		nl = kl - new_delta * direction
-	nl = min(1.0, max(0.0, nl))
+	nl = min(1.0, max(bl, kl + new_delta))
 	r, g, b = colorsys.hls_to_rgb(bh, nl, bs)
 	return ColourRGBA(round(r * 255), round(g * 255), round(b * 255), base.a)
 

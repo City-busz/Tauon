@@ -1623,15 +1623,28 @@ class ColoursClass:
 		self.artist_bio_background = ColourRGBA(27, 27, 27, 255)
 		self.artist_bio_text       = ColourRGBA(230, 230, 230, 255)
 
-	def apply_transparency(self) -> None:
+	def apply_transparency(self, full: bool = False) -> None:
+		"""Translucent panel fills for compositor window transparency.
+
+		Accent mode leaves the tracklist area opaque; full mode makes every
+		panel see-through."""
 		self.top_panel_background.a = 140
 		self.side_panel_background.a = 140
 		self.art_box.a = 100
 		self.window_frame.a = 100
 		self.bottom_panel_colour.a = 200
 
-		# colours.playlist_panel_background.a = 220
-		# colours.playlist_box_background  = [0, 0, 0, 100]
+		if full:
+			for name in (
+				"playlist_panel_background",
+				"gallery_background",
+				"queue_background",
+				"playlist_box_background",
+				"lyrics_panel_background",
+			):
+				c = getattr(self, name, None)
+				if c is not None:
+					c.a = 175
 
 	def post_config(self) -> None:
 		if self.box_thumb_background is None:
@@ -14465,6 +14478,11 @@ class Tauon:
 		for colour in element_colours:
 			colour.a = element_alpha
 
+		# The window-transparency styles set their own panel alphas at theme
+		# (re)load; don't clobber them back to opaque here
+		if not prefs.art_bg and prefs.transparent_mode:
+			colours.apply_transparency(full=prefs.transparent_mode == 2)
+
 		# -----
 
 		# Adjust for for compact window sizes ----
@@ -18826,6 +18844,18 @@ class Tauon:
 			artistc = self.colours.playlist_text_missing
 			albumc  = self.colours.playlist_text_missing
 
+		# Over the art background, grey row text picks up a hint of the
+		# art hue (hls_hue_mix passes coloured text through; no lightness
+		# boost for row text). One averaged sample serves the whole
+		# tracklist so every row tints the same way.
+		so = self.style_overlay
+		if so.tracklist_sample is not None:
+			timec   = so.tint_from_sample(timec, so.tracklist_sample, 0.2)
+			titlec  = so.tint_from_sample(titlec, so.tracklist_sample, 0.2)
+			indexc  = so.tint_from_sample(indexc, so.tracklist_sample, 0.2)
+			artistc = so.tint_from_sample(artistc, so.tracklist_sample, 0.2)
+			albumc  = so.tint_from_sample(albumc, so.tracklist_sample, 0.2)
+
 		artistoffset = 0
 		indexLine = ""
 
@@ -19738,45 +19768,67 @@ class Tauon:
 			self.gui.rspw = self.gui.pref_rspw
 		return None
 
-	def toggle_auto_theme(self, mode: int = 0) -> bool | None:
-		if mode == 1:
-			return self.prefs.colour_from_image
+	# --- Background style: one mutually exclusive choice between the plain
+	# theme, window transparency, auto-theming from art, and the album-art
+	# backgrounds (settings → theme card)
 
-		self.prefs.colour_from_image ^= True
-		self.gui.theme_temp_current = -1
-		self.gui.reload_theme = True
-
-		# if self.prefs.colour_from_image and self.prefs.art_bg and not self.inp.key_shift_down:
-		# 	toggle_auto_bg()
-		return None
-
-	def toggle_transparent_accent(self, mode: int= 0) -> bool | None:
-		if mode == 1:
-			return self.prefs.transparent_mode == 1
-
-		if self.prefs.transparent_mode == 1:
+	def _clear_background_style(self) -> None:
+		"""Turn every background-style mode off (back to the base theme)"""
+		if self.prefs.art_bg:
+			self.prefs.art_bg = False
+			self.style_overlay.flush()
+			self.thread_manager.ready("style")
+		if self.prefs.transparent_mode:
 			self.prefs.transparent_mode = 0
-		else:
-			self.prefs.transparent_mode = 1
-
-		self.gui.reload_theme = True
+			self.gui.reload_theme = True  # Restores panel alphas
+		if self.prefs.colour_from_image:
+			self.prefs.colour_from_image = False
+			self.gui.theme_temp_current = -1
+			self.gui.reload_theme = True
+		self.gui.update_layout = True  # Removes panel translucency
 		self.gui.request_frame()
 		self.gui.request_tracklist_redraw()
+
+	def set_bg_style_base(self, mode: int = 0) -> bool | None:
+		if mode == 1:
+			return not self.prefs.art_bg and not self.prefs.transparent_mode and not self.prefs.colour_from_image
+		self._clear_background_style()
 		return None
 
-	def set_art_bg_off(self, mode: int = 0) -> bool | None:
+	def set_bg_style_transparent_accent(self, mode: int = 0) -> bool | None:
 		if mode == 1:
-			return not self.prefs.art_bg
-		if not self.prefs.art_bg:
-			return None
-		self.prefs.art_bg = False
-		self.gui.update_layout = True  # Removes panel translucency
-		self.style_overlay.flush()
-		self.thread_manager.ready("style")
-		self.gui.request_frame()
+			return self.prefs.transparent_mode == 1 and not self.prefs.art_bg and not self.prefs.colour_from_image
+		self._clear_background_style()
+		self.prefs.transparent_mode = 1
+		self.gui.reload_theme = True
+		return None
+
+	def set_bg_style_full_transparent(self, mode: int = 0) -> bool | None:
+		if mode == 1:
+			return self.prefs.transparent_mode == 2 and not self.prefs.art_bg and not self.prefs.colour_from_image
+		self._clear_background_style()
+		self.prefs.transparent_mode = 2
+		self.gui.reload_theme = True
+		return None
+
+	def set_bg_style_colourise(self, mode: int = 0) -> bool | None:
+		if mode == 1:
+			return self.prefs.colour_from_image and not self.prefs.art_bg
+		self._clear_background_style()
+		self.prefs.colour_from_image = True
+		self.gui.theme_temp_current = -1
+		self.gui.reload_theme = True
 		return None
 
 	def _set_art_bg(self, frosted: bool, stronger: int) -> None:
+		# Leaving the other background styles
+		if self.prefs.transparent_mode:
+			self.prefs.transparent_mode = 0
+			self.gui.reload_theme = True
+		if self.prefs.colour_from_image:
+			self.prefs.colour_from_image = False
+			self.gui.theme_temp_current = -1
+			self.gui.reload_theme = True
 		# The blur image only needs regenerating when the look changes;
 		# strength is applied at draw time via panel translucency
 		regenerate = not self.prefs.art_bg or self.prefs.art_bg_frosted != frosted
@@ -23569,7 +23621,7 @@ class AlbumArt:
 				self.gui.theme_temp_current = track.album
 
 				if self.prefs.transparent_mode:
-					colours.apply_transparency()
+					colours.apply_transparency(full=self.prefs.transparent_mode == 2)
 
 		except Exception:
 			logging.exception("Error extracting theme colours from image")
@@ -23702,9 +23754,16 @@ class StyleOverlay:
 
 		# Small copy of the processed blur image for sampling local colour
 		# under UI elements (see sample_background). `sample_source` is set
-		# by the worker thread, promoted to `sample_a` alongside a_texture.
+		# by the worker thread, promoted to `sample_a` alongside a_texture;
+		# the previous sample is kept as `sample_b` so sampled colours can
+		# crossfade in step with the art transition.
 		self.sample_source: Image.Image | None = None
 		self.sample_a: Image.Image | None = None
+		self.sample_b: Image.Image | None = None
+
+		# Averaged sample for the whole tracklist area, refreshed at the
+		# start of each tracklist render so all its text shares one tint
+		self.tracklist_sample: ColourRGBA | None = None
 
 		self.go_to_sleep: bool = False
 
@@ -23754,6 +23813,7 @@ class StyleOverlay:
 			sdl3.SDL_DestroyTexture(self.b_texture)
 			self.b_texture = None
 		self.sample_a = None
+		self.sample_b = None
 		self.min_on_timer.force_set(-0.2)
 		self.parent_path = "None"
 		self.stage = 0
@@ -23765,15 +23825,59 @@ class StyleOverlay:
 	def sample_background(self, x: float, y: float) -> ColourRGBA | None:
 		"""Local colour of the blurred art background near window point (x, y).
 
-		Returns None when the art background isn't currently displayed."""
+		While a new art background is fading in over the old one, the two
+		samples are crossfaded with the same timing so derived colours
+		follow the transition instead of jumping. Returns None when the art
+		background isn't currently displayed. (No stage check: while the
+		worker prepares the next track's blur the old background is still
+		on screen, and its sample stays valid.)"""
 		sample = self.sample_a
-		if sample is None or self.a_rect is None or self.stage != 2 or not self.gui.have_art_bg:
+		if sample is None or self.a_rect is None or not self.gui.have_art_bg:
 			return None
 		fx = min(1.0, max(0.0, (x - self.a_rect.x) / max(1.0, self.a_rect.w)))
 		fy = min(1.0, max(0.0, (y - self.a_rect.y) / max(1.0, self.a_rect.h)))
 		w, h = sample.size
 		r, g, b = sample.getpixel((int(fx * (w - 1)), int(fy * (h - 1))))[:3]
+		t = self.fade_on_timer.get()
+		if t < 0.4 and self.sample_b is not None:
+			w2, h2 = self.sample_b.size
+			r2, g2, b2 = self.sample_b.getpixel((int(fx * (w2 - 1)), int(fy * (h2 - 1))))[:3]
+			f = min(1.0, max(0.0, t / 0.4))
+			r = round(r2 + (r - r2) * f)
+			g = round(g2 + (g - g2) * f)
+			b = round(b2 + (b - b2) * f)
 		return ColourRGBA(r, g, b, 255)
+
+	def sample_background_average(self, x: float, y: float, w: float, h: float) -> ColourRGBA | None:
+		"""Average of a grid of local samples across the given window rect,
+		for tinting a whole region's text with one uniform colour."""
+		rt = gt = bt = 0
+		points = (0.17, 0.5, 0.83)
+		for fx in points:
+			for fy in points:
+				s = self.sample_background(x + w * fx, y + h * fy)
+				if s is None:
+					return None
+				rt += s.r
+				gt += s.g
+				bt += s.b
+		n = len(points) ** 2
+		return ColourRGBA(round(rt / n), round(gt / n), round(bt / n), 255)
+
+	def adjust_strength(self) -> float:
+		"""0..1 weight for background-derived colour adjustments.
+
+		Ramps up with the art fade-in when there is no previous art to
+		crossfade from, and back down with the fade-out, so tinted/boosted
+		colours track the background's actual visibility."""
+		if self.go_to_sleep:
+			t = self.fade_off_timer.get()
+			if t > 1:
+				return max(0.0, 1.0 - (t - 1) / 0.4)
+			return 1.0
+		if self.sample_b is None:
+			return min(1.0, max(0.0, self.fade_on_timer.get() / 0.4))
+		return 1.0
 
 	def tint_from_background(
 		self, colour: ColourRGBA, x: float, y: float, amount: float = 0.15,
@@ -23785,20 +23889,32 @@ class StyleOverlay:
 		no art background is showing.
 
 		If `panel` (the translucent panel fill the element sits on) is given,
-		at high art strength the colour's lightness is also pushed away from
-		the effective backdrop — the panel blended over the local art — so
-		buttons can't land at the same lightness as the art behind them."""
-		sample = self.sample_background(x, y)
+		the colour's lightness is also boosted away from the effective
+		backdrop — the panel blended over the local art — so buttons can't
+		land at the same lightness as the art behind them. The boost is
+		gentler below high art strength."""
+		return self.tint_from_sample(colour, self.sample_background(x, y), amount, panel)
+
+	def tint_from_sample(
+		self, colour: ColourRGBA, sample: ColourRGBA | None, amount: float = 0.15,
+		panel: ColourRGBA | None = None,
+	) -> ColourRGBA:
+		"""tint_from_background against an already-sampled background colour
+		(e.g. the averaged tracklist sample)."""
 		if sample is None:
 			return colour
-		colour = hls_hue_mix(colour, sample, amount)
-		if panel is not None and self.prefs.art_bg_stronger >= 3:
+		strength = self.adjust_strength()
+		if strength <= 0:
+			return colour
+		colour = hls_hue_mix(colour, sample, amount * strength)
+		if panel is not None:
 			f = panel.a / 255
 			backdrop = ColourRGBA(
 				round(panel.r * f + sample.r * (1 - f)),
 				round(panel.g * f + sample.g * (1 - f)),
 				round(panel.b * f + sample.b * (1 - f)), 255)
-			colour = hls_pull_contrast(colour, backdrop)
+			floor = 0.18 if self.prefs.art_bg_stronger >= 3 else 0.12
+			colour = hls_pull_contrast(colour, backdrop, floor * strength)
 		return colour
 
 	def display(self, background: bool = False) -> None:
@@ -23838,6 +23954,7 @@ class StyleOverlay:
 			if self.a_texture is not None:
 				self.b_texture = self.a_texture
 				self.b_rect = self.a_rect
+				self.sample_b = self.sample_a
 
 			self.a_texture = c
 			self.a_rect = dst
@@ -23902,6 +24019,10 @@ class StyleOverlay:
 			if t < 0.4:
 				fade = round(t / 0.4 * 255)
 				self.gui.request_frame()
+				# Tracklist text colours derived from the background are
+				# baked into its cached texture; re-render it through the
+				# fade so they follow the transition
+				self.gui.request_tracklist_redraw()
 
 			else:
 				fade = 255
@@ -23909,6 +24030,7 @@ class StyleOverlay:
 			if self.go_to_sleep:
 				t = self.fade_off_timer.get()
 				self.gui.request_frame()
+				self.gui.request_tracklist_redraw()
 
 				if t < 1:
 					fade = 255
@@ -26586,7 +26708,7 @@ class Over:
 	def apply_theme_preview_colours(self, source: ColoursClass) -> None:
 		preview = clone_theme_colours(source)
 		if self.prefs.transparent_mode:
-			preview.apply_transparency()
+			preview.apply_transparency(full=self.prefs.transparent_mode == 2)
 		self.colours.__dict__.clear()
 		self.colours.__dict__.update(copy.deepcopy(preview.__dict__))
 		if self.colours.deco:
@@ -28895,53 +29017,26 @@ class Over:
 	def render_settings_theme_category(self, x: int, y: int, w: int, accent: ColourRGBA, draw: bool = True) -> int:
 		gui = self.gui
 		prefs = self.prefs
-		column_gap = round(12 * gui.scale)
-		left_w = max(round(270 * gui.scale), min(round(w * 0.48), w - round(250 * gui.scale)))
-		right_w = w - left_w - column_gap
-		row_h = round(30 * gui.scale)
 		row_gap = round(6 * gui.scale)
 		action_h = round(36 * gui.scale)
 		preset_gap = round(6 * gui.scale)
 		preset_w = round(28 * gui.scale)
 		preset_h = round(16 * gui.scale)
-		right_inner_w = right_w - round(36 * gui.scale)
+		style_label_h = round(20 * gui.scale)
+		style_bar_h = round(32 * gui.scale)
+		card_inner_w = w - round(36 * gui.scale)
 		theme_count = max(len(self.themes), 1)
-		preset_columns = max(1, min(theme_count, (right_inner_w + preset_gap) // max(preset_w + preset_gap, 1)))
+		preset_columns = max(1, min(theme_count, (card_inner_w + preset_gap) // max(preset_w + preset_gap, 1)))
 		preset_rows = max(1, math.ceil(theme_count / preset_columns))
 		preset_grid_h = preset_rows * preset_h + max(0, preset_rows - 1) * preset_gap
-		# Label + segmented bar (20 + 32), then the auto-theme switch row
-		left_min_h = round(80 * gui.scale) + round(52 * gui.scale) + row_gap + row_h
-		right_min_h = round(132 * gui.scale) + preset_grid_h + row_gap * 3 + action_h + row_h
-		card_h = max(left_min_h, right_min_h)
-		left_rect = (x, y, left_w, card_h)
-		right_rect = (x + left_w + column_gap, y, right_w, card_h)
+		# Preset grid, action buttons, then the Background Style bar at the bottom
+		card_h = round(132 * gui.scale) + preset_grid_h + row_gap * 3 + action_h + style_label_h + style_bar_h
+		card_rect = (x, y, w, card_h)
 		if not draw:
-			return max(left_rect[3], right_rect[3])
+			return card_rect[3]
 
 		inner_x, inner_y, inner_w, section_h = self.draw_settings_section(
-			left_rect,
-			_("Background"),
-			_("Artwork and automatic theme changes."),
-			accent,
-		)
-		self.ddt.text((inner_x, inner_y), _("Album art as background"), self.colours.box_text_label, 11)
-		inner_y += round(20 * gui.scale)
-		bar_h = self.settings_segmented_bar(
-			(inner_x, inner_y),
-			(
-				(_("Off"), self.tauon.set_art_bg_off(1), self.tauon.set_art_bg_off),
-				(_("Clear"), self.tauon.set_art_bg_clear(1), self.tauon.set_art_bg_clear),
-				(_("Frosted low"), self.tauon.set_art_bg_frosted_low(1), self.tauon.set_art_bg_frosted_low),
-				(_("Frosted high"), self.tauon.set_art_bg_frosted_high(1), self.tauon.set_art_bg_frosted_high),
-			),
-			accent,
-			width=inner_w,
-		)
-		inner_y += bar_h + row_gap
-		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_theme, _("Auto-theme from album art"), accent=accent)
-
-		inner_x, inner_y, inner_w, section_h = self.draw_settings_section(
-			right_rect,
+			card_rect,
 			_("Theme preset"),
 				gui.theme_name,
 			accent,
@@ -29021,8 +29116,9 @@ class Over:
 					segment_width = segment_w
 				self.ddt.rect((segment_x, strip_y, segment_width, strip_h), colour_value)
 
-		toggle_y = right_rect[1] + right_rect[3] - round(14 * gui.scale) - row_h
-		action_y = toggle_y - row_gap - action_h
+		style_bar_y = card_rect[1] + card_rect[3] - round(14 * gui.scale) - style_bar_h
+		style_label_y = style_bar_y - style_label_h
+		action_y = style_label_y - row_gap - action_h
 		icon_button_w = round(26 * gui.scale)
 		icon_gap = round(4 * gui.scale)
 		action_total_w = icon_button_w * 3 + icon_gap * 2
@@ -29048,9 +29144,26 @@ class Over:
 			icon=self.gui.delete_icon,
 			tooltip=_("Delete"),
 		)
-		self.settings_switch_row((inner_x, toggle_y, inner_w, row_h), self.tauon.toggle_transparent_accent, _("Transparent accent"), accent=accent)
 
-		return max(left_rect[3], right_rect[3])
+		# One mutually exclusive choice between the plain theme, window
+		# transparency, auto-theming and the album-art backgrounds
+		self.ddt.text((inner_x, style_label_y), _("Background Style"), self.colours.box_text_label, 11)
+		self.settings_segmented_bar(
+			(inner_x, style_bar_y),
+			(
+				(_("Default"), self.tauon.set_bg_style_base(1), self.tauon.set_bg_style_base),
+				(_("Transparent 1"), self.tauon.set_bg_style_transparent_accent(1), self.tauon.set_bg_style_transparent_accent),
+				(_("Transparent 2"), self.tauon.set_bg_style_full_transparent(1), self.tauon.set_bg_style_full_transparent),
+				(_("Colourise"), self.tauon.set_bg_style_colourise(1), self.tauon.set_bg_style_colourise),
+				(_("Clear Art"), self.tauon.set_art_bg_clear(1), self.tauon.set_art_bg_clear),
+				(_("Frost lo"), self.tauon.set_art_bg_frosted_low(1), self.tauon.set_art_bg_frosted_low),
+				(_("Frost hi"), self.tauon.set_art_bg_frosted_high(1), self.tauon.set_art_bg_frosted_high),
+			),
+			accent,
+			width=inner_w,
+		)
+
+		return card_rect[3]
 
 	def render_settings_window_category(self, x: int, y: int, w: int, accent: ColourRGBA, draw: bool = True) -> int:
 		gui = self.gui
@@ -32314,11 +32427,13 @@ class BottomBarType1:
 		seek_bg = so.tint_from_background(
 			colours.seek_bar_background,
 			self.seek_bar_position[0] + self.seek_bar_size[0] / 2,
-			self.seek_bar_position[1] + self.seek_bar_size[1] / 2)
+			self.seek_bar_position[1] + self.seek_bar_size[1] / 2,
+			panel=colours.bottom_panel_colour)
 		volume_bg = so.tint_from_background(
 			colours.volume_bar_background,
 			self.volume_bar_position[0] + self.volume_bar_size[0] / 2,
-			self.volume_bar_position[1] + self.volume_bar_size[1] / 2)
+			self.volume_bar_position[1] + self.volume_bar_size[1] / 2,
+			panel=colours.bottom_panel_colour)
 		buttons_y = window_size[1] - self.control_line_bottom
 		panel_bg = colours.bottom_panel_colour
 		mb_off = so.tint_from_background(colours.media_buttons_off, 150 * gui.scale, buttons_y, 0.2, panel_bg)
@@ -35111,6 +35226,9 @@ class StandardPlaylist:
 		sdl3.SDL_RenderClear(self.renderer)
 
 		rect = (left, gui.panelY, width, window_size[1] - (gui.panelBY + gui.panelY))
+
+		# One averaged art-bg sample shared by all tracklist text this render
+		tauon.style_overlay.tracklist_sample = tauon.style_overlay.sample_background_average(*rect)
 		ddt.rect(rect, colours.playlist_panel_background)
 
 		# This draws an optional background image
@@ -35736,6 +35854,14 @@ class StandardPlaylist:
 
 				height = line_y + gui.playlist_row_height - 19 * gui.scale  # gui.pl_title_y_offset
 
+				# Over the art background the title line gets the hue mix-in
+				# and lightness boost like the panel buttons do, from the
+				# tracklist's shared averaged sample
+				folder_title_colour = tauon.style_overlay.tint_from_sample(
+					colours.folder_title,
+					tauon.style_overlay.tracklist_sample,
+					0.2, colours.playlist_panel_background)
+
 				star_offset = 0
 				if gui.show_album_ratings:
 					star_offset = round(72 * gui.scale)
@@ -35786,7 +35912,7 @@ class StandardPlaylist:
 					was = False
 					run = 0
 					duration = get_display_time(total_time)
-					colour = copy.deepcopy(colours.folder_title)
+					colour = copy.deepcopy(folder_title_colour)
 					colour.a = max(colour.a - 50, 0)
 
 					if prefs.append_total_time and duration:
@@ -35813,12 +35939,12 @@ class StandardPlaylist:
 							(ex - run, height, 1), tr.genre, colour,
 							gui.row_font_size + gui.pl_title_font_offset)
 
-					w2 = ddt.text((xx, height), title_line, colours.folder_title, gui.row_font_size + gui.pl_title_font_offset, max_w=ww - (start_offset + run + round(10 * gui.scale) + folder_title_right_pad))
+					w2 = ddt.text((xx, height), title_line, folder_title_colour, gui.row_font_size + gui.pl_title_font_offset, max_w=ww - (start_offset + run + round(10 * gui.scale) + folder_title_right_pad))
 				else:
 					date_w = 0
 					if date:
 						date_w = ddt.text(
-							(ex, height, 1), date, colours.folder_title,
+							(ex, height, 1), date, folder_title_colour,
 							gui.row_font_size + gui.pl_title_font_offset)
 						date_w += 4 * gui.scale
 						if qq > 1:
@@ -35836,13 +35962,13 @@ class StandardPlaylist:
 						date_w += 19 * gui.scale
 						ddt.text(
 							(left + gui.highlight_left + 8 * gui.scale + extra, height), line,
-							colours.folder_title,
+							folder_title_colour,
 							gui.row_font_size + gui.pl_title_font_offset,
 							highlight_width - date_w - extra - star_offset - folder_title_right_pad)
 					else:
 						ddt.text(
 							(ex - date_w, height, 1), line,
-							colours.folder_title,
+							folder_title_colour,
 							gui.row_font_size + gui.pl_title_font_offset)
 
 				# -----
@@ -36216,6 +36342,13 @@ class StandardPlaylist:
 
 							col_left = text_x - 6 * gui.scale
 							wid = max(0, wid)
+
+							# Grey column text picks up a hint of the art hue
+							# over the art background (coloured text passes
+							# through; no lightness boost for row text), from
+							# the tracklist's shared averaged sample
+							colour = tauon.style_overlay.tint_from_sample(
+								colour, tauon.style_overlay.tracklist_sample, 0.2)
 
 							# # Hacky. Places a dark background behind light text for readability over mascot
 							# if pl_bg and gui.set_mode and colour_value(norm_colour) < 400 and not colours.lm:
@@ -46861,7 +46994,7 @@ def load_prefs(bag: Bag) -> None:
 	cf.add_text("[ui]")
 
 	prefs.theme_name = cf.sync_add("string", "theme-name", prefs.theme_name)
-	prefs.transparent_mode = cf.sync_add("int", "transparent-style", prefs.transparent_mode, "0=opaque(default), 1=accents")
+	prefs.transparent_mode = cf.sync_add("int", "transparent-style", prefs.transparent_mode, "0=opaque(default), 1=accents, 2=full")
 	if first_run and prefs.macos:
 		# Round by default on macOS where every other window has rounded corners
 		prefs.rounded_corners = True
@@ -54856,13 +54989,14 @@ def main(holder: Holder) -> None:
 
 			if gui.mode == GuiMode.MAIN:
 				if keymaps.test("toggle-auto-theme"):
-					prefs.colour_from_image ^= True
+					# Background styles are mutually exclusive; go through the
+					# setters so the other modes get cleared
 					if prefs.colour_from_image:
-						tauon.show_message(_("Enabled auto theme"))
-					else:
+						tauon.set_bg_style_base()
 						tauon.show_message(_("Disabled auto theme"))
-						gui.reload_theme = True
-						gui.theme_temp_current = -1
+					else:
+						tauon.set_bg_style_colourise()
+						tauon.show_message(_("Enabled auto theme"))
 
 				if keymaps.test("transfer-playtime-to"):
 					if (
@@ -55411,7 +55545,7 @@ def main(holder: Holder) -> None:
 				tauon.deco.unload()
 
 			if prefs.transparent_mode:
-				colours.apply_transparency()
+				colours.apply_transparency(full=prefs.transparent_mode == 2)
 
 			prefs.theme_name = gui.theme_name
 
@@ -55420,6 +55554,17 @@ def main(holder: Holder) -> None:
 			ddt.text_background_colour = colours.playlist_panel_background
 			# Re-apply art-bg panel translucency to the fresh colour objects
 			gui.update_layout = True
+
+			# With Colourise active, scan the current track's art over the
+			# freshly loaded theme right away instead of waiting for album
+			# art to next be drawn (cached temp themes embed the previous
+			# base theme, so drop them)
+			if prefs.colour_from_image:
+				gui.theme_temp_current = -1
+				gui.temp_themes.clear()
+				colourise_track = pctl.playing_object()
+				if colourise_track:
+					tauon.album_art_gen.display(colourise_track, (0, 0), (50, 50), theme_only=True)
 
 		# ---------------------------------------------------------------------------------------------------------
 		# GUI DRAWING------
