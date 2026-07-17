@@ -2952,7 +2952,14 @@ class CustomLayout:
 			inp.mouse_position[0], inp.mouse_position[1] = mx, my
 		self._held_mouse = None
 
-		ddt.rect((0, 0, ww, wh), tauon.colours.playlist_panel_background)
+		# Cover the standard layout rendered underneath. With the art
+		# background active the panel colour carries alpha and would let the
+		# standard UI ghost through, so lay down the opaque base + blurred
+		# art again and let the translucent widget fills blend over that.
+		if gui.have_art_bg:
+			tauon.style_overlay.display(background=True)
+		else:
+			ddt.rect((0, 0, ww, wh), tauon.colours.playlist_panel_background)
 
 		root = self.ensure_slot()
 		# Make sure the active slot's columns config is applied. Covers a restart

@@ -14423,17 +14423,42 @@ class Tauon:
 			"lyrics_panel_background",
 		)
 		panel_colours = [c for c in (getattr(colours, name, None) for name in panel_colour_names) if c is not None]
-		# Menus draw over other UI and must stay readable; de-alias if the
-		# theme shares an object with a panel colour before changing alphas
-		if colours.menu_background is not None and any(colours.menu_background is c for c in panel_colours):
-			mb = colours.menu_background
-			colours.menu_background = ColourRGBA(mb.r, mb.g, mb.b, mb.a)
+
+		# Smaller UI furniture sitting on the panels also lets the art
+		# through, but less so than the panels themselves
+		element_colour_names = (
+			"tab_background",
+			"tab_background_active",
+			"seek_bar_background",
+			"volume_bar_background",
+			"column_bar_background",
+			"folder_line",
+		)
+		element_colours = [c for c in (getattr(colours, name, None) for name in element_colour_names) if c is not None]
+
+		# Menus, dialogs and their controls draw over other UI and must stay
+		# readable; de-alias any that share an object with a colour being
+		# made translucent before changing alphas
+		modified_colours = panel_colours + element_colours
+		for keep_name in ("menu_background", "toggle_box_on", "sys_tab_bg", "sys_tab_hl"):
+			keep = getattr(colours, keep_name, None)
+			if keep is not None and any(keep is c for c in modified_colours):
+				setattr(colours, keep_name, ColourRGBA(keep.r, keep.g, keep.b, keep.a))
 
 		panel_alpha = 255
+		element_alpha = 255
 		if prefs.art_bg:
-			panel_alpha = max(120, 255 - prefs.art_bg_opacity * 3)
+			panel_alpha = max(120, 255 - round(prefs.art_bg_opacity * 2.5))
+			# Elements draw on top of the translucent panel fills, so their
+			# translucency stacks with the panel's: with fill alpha `a` the
+			# element region ends up (1 - a/255) as transparent as the bare
+			# panel — e.g. 115 keeps ~55% extra opacity over the panel while
+			# still letting the art through
+			element_alpha = 115
 		for colour in panel_colours:
 			colour.a = panel_alpha
+		for colour in element_colours:
+			colour.a = element_alpha
 
 		# -----
 
