@@ -220,6 +220,7 @@ class Prefs:
 	repeat_mode: bool = False
 
 	failed_artists: list[str] = field(default_factory=list)
+	failed_background_artists: list[str] = field(default_factory=list)
 
 	artist_list: bool = False
 	auto_sort: bool = False
@@ -310,6 +311,7 @@ class Prefs:
 	auto_dl_artist_data: bool = True
 
 	enable_fanart_artist: bool = False
+	enable_fanart_bg: bool = False
 	enable_fanart_cover: bool = False
 
 	always_auto_update_playlists: bool = False
@@ -381,6 +383,7 @@ class Prefs:
 
 	phazor_device_selected = "Default"
 	phazor_devices = ["Default"]
+	bg_flips = set()
 	use_tray: bool = False
 	tray_show_title: bool = False
 	drag_to_unpin: bool = True
