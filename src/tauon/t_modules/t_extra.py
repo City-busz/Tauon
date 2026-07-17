@@ -788,6 +788,18 @@ def rgb_to_hls(r: float, g: float, b: float) -> tuple[float, float, float]:
 	return colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
 
 
+def hls_hue_mix(base: ColourRGBA, sample: ColourRGBA, amount: float) -> ColourRGBA:
+	"""Tint base towards the hue of sample, keeping base's lightness and alpha.
+
+	`amount` scales how much of sample's saturation is mixed in, so grey
+	bases pick up a hint of the sample's colour rather than being recoloured."""
+	sh, _sl, ss = colorsys.rgb_to_hls(sample.r / 255, sample.g / 255, sample.b / 255)
+	_bh, bl, bs = colorsys.rgb_to_hls(base.r / 255, base.g / 255, base.b / 255)
+	s = min(1.0, bs + ss * amount)
+	r, g, b = colorsys.hls_to_rgb(sh, bl, s)
+	return ColourRGBA(round(r * 255), round(g * 255), round(b * 255), base.a)
+
+
 def rgb_add_hls(source: ColourRGBA, h: float = 0, l: float = 0, s: float = 0) -> ColourRGBA:
 	c = colorsys.rgb_to_hls(source.r / 255, source.g / 255, source.b / 255)
 	colour = colorsys.hls_to_rgb(c[0] + h, min(max(c[1] + l, 0), 1), min(max(c[2] + s, 0), 1))

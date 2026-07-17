@@ -173,6 +173,7 @@ from tauon.t_modules.t_extra import (  # noqa: E402
 	get_split_artists,
 	get_year_from_string,
 	grow_rect,
+	hls_hue_mix,
 	hls_to_rgb,
 	hms_to_seconds,
 	hsl_to_rgb,
@@ -23102,6 +23103,9 @@ class AlbumArt:
 
 		self.gui.center_blur_pixel = im.getpixel((new_x // 2, new_y // 2))
 
+		# Keep a small copy for sampling local colour under UI elements
+		self.style_overlay.sample_source = im.resize((64, 40)).convert("RGB")
+
 		g = io.BytesIO()
 		g.seek(0)
 
@@ -23801,6 +23805,12 @@ class StyleOverlay:
 		self.hole_punches: list[sdl3.SDL_FRect] = []
 		#self.hole_refills = []
 
+		# Small copy of the processed blur image for sampling local colour
+		# under UI elements (see sample_background). `sample_source` is set
+		# by the worker thread, promoted to `sample_a` alongside a_texture.
+		self.sample_source: Image.Image | None = None
+		self.sample_a: Image.Image | None = None
+
 		self.go_to_sleep: bool = False
 
 		self.current_track_album: str = "none"
@@ -23848,6 +23858,7 @@ class StyleOverlay:
 		if self.b_texture is not None:
 			sdl3.SDL_DestroyTexture(self.b_texture)
 			self.b_texture = None
+		self.sample_a = None
 		self.min_on_timer.force_set(-0.2)
 		self.parent_path = "None"
 		self.stage = 0
@@ -23855,6 +23866,29 @@ class StyleOverlay:
 		self.gui.style_worker_timer.set()
 		self.gui.delay_frame(0.25)
 		self.gui.request_frame()
+
+	def sample_background(self, x: float, y: float) -> ColourRGBA | None:
+		"""Local colour of the blurred art background near window point (x, y).
+
+		Returns None when the art background isn't currently displayed."""
+		sample = self.sample_a
+		if sample is None or self.a_rect is None or self.stage != 2 or not self.gui.have_art_bg:
+			return None
+		fx = min(1.0, max(0.0, (x - self.a_rect.x) / max(1.0, self.a_rect.w)))
+		fy = min(1.0, max(0.0, (y - self.a_rect.y) / max(1.0, self.a_rect.h)))
+		w, h = sample.size
+		r, g, b = sample.getpixel((int(fx * (w - 1)), int(fy * (h - 1))))[:3]
+		return ColourRGBA(r, g, b, 255)
+
+	def tint_from_background(self, colour: ColourRGBA, x: float, y: float, amount: float = 0.15) -> ColourRGBA:
+		"""Mix a little of the background art's local hue/saturation into
+		colour (keeping its lightness and alpha), so grey furniture doesn't
+		clash with a coloured backdrop. Passes colour through unchanged when
+		no art background is showing."""
+		sample = self.sample_background(x, y)
+		if sample is None:
+			return colour
+		return hls_hue_mix(colour, sample, amount)
 
 	def display(self, background: bool = False) -> None:
 		if background:
@@ -23898,6 +23932,7 @@ class StyleOverlay:
 			self.a_texture = c
 			self.a_rect = dst
 			self.a_type = self.album_art_gen.loaded_bg_type
+			self.sample_a = self.sample_source
 
 			self.stage = 2
 			self.radio_meta = None
@@ -31483,6 +31518,8 @@ class TopPanel:
 			colour = colours.corner_button
 			if self.coll(rect):
 				colour = colours.corner_button_active
+		colour = self.tauon.style_overlay.tint_from_background(
+			colour, wwx + 60 * gui.scale, yy + 16 * gui.scale, 0.2)
 
 		if not prefs.shuffle_lock and not gui.custom_mode:
 			# The panel button hides in custom mode (the layout/edit button below
@@ -31506,6 +31543,8 @@ class TopPanel:
 				inp.mouse_click = False
 				self.tauon.layout_menu.activate(position=(lrect[0], lrect[1] + lrect[3]))
 			lcol = colours.corner_button_active if self.tauon.layout_menu.active else colours.corner_button
+			lcol = self.tauon.style_overlay.tint_from_background(
+				lcol, wwx + 20 * gui.scale, yy + 16 * gui.scale, 0.2)
 			gw = round(18 * gui.scale)
 			gh = round(13 * gui.scale)
 			draw_layout_glyph(
@@ -32062,6 +32101,7 @@ class TopPanel:
 			bg = colours.status_text_over
 		else:
 			bg = colours.status_text_normal
+		bg = tauon.style_overlay.tint_from_background(bg, x, y + 8 * gui.scale, 0.2)
 		ddt.text((x, y), word, bg, 212)
 
 		if hit and inp.mouse_click:
@@ -32386,7 +32426,25 @@ class BottomBarType1:
 		ddt.rect_a((0, self.window_size[1] - self.gui.panelBY), (self.window_size[0], self.gui.panelBY), colours.bottom_panel_colour)
 		sdl3.SDL_SetRenderDrawBlendMode(self.renderer, sdl3.SDL_BLENDMODE_BLEND)
 
-		ddt.rect_a(self.seek_bar_position, self.seek_bar_size, colours.seek_bar_background)
+		# Let the grey furniture inherit a hint of the local art hue/saturation
+		so = tauon.style_overlay
+		seek_bg = so.tint_from_background(
+			colours.seek_bar_background,
+			self.seek_bar_position[0] + self.seek_bar_size[0] / 2,
+			self.seek_bar_position[1] + self.seek_bar_size[1] / 2)
+		volume_bg = so.tint_from_background(
+			colours.volume_bar_background,
+			self.volume_bar_position[0] + self.volume_bar_size[0] / 2,
+			self.volume_bar_position[1] + self.volume_bar_size[1] / 2)
+		buttons_y = window_size[1] - self.control_line_bottom
+		mb_off = so.tint_from_background(colours.media_buttons_off, 150 * gui.scale, buttons_y, 0.2)
+		mb_active = so.tint_from_background(colours.media_buttons_active, 150 * gui.scale, buttons_y, 0.2)
+		mb_over = so.tint_from_background(colours.media_buttons_over, 150 * gui.scale, buttons_y, 0.2)
+		md_off = so.tint_from_background(colours.mode_button_off, window_size[0] - 120 * gui.scale, buttons_y, 0.2)
+		md_active = so.tint_from_background(colours.mode_button_active, window_size[0] - 120 * gui.scale, buttons_y, 0.2)
+		md_over = so.tint_from_background(colours.mode_button_over, window_size[0] - 120 * gui.scale, buttons_y, 0.2)
+
+		ddt.rect_a(self.seek_bar_position, self.seek_bar_size, seek_bg)
 
 		right_offset = 0
 		if gui.display_time_mode >= 2:
@@ -32615,24 +32673,24 @@ class BottomBarType1:
 
 						pctl.set_volume()
 
-				colour = colours.mode_button_off
+				colour = md_off
 
 				if bar == 0 and pctl.player_volume > 0:
-					colour = colours.mode_button_active
+					colour = md_active
 				elif bar == 1 and pctl.player_volume >= 10:
-					colour = colours.mode_button_active
+					colour = md_active
 				elif bar == 2 and pctl.player_volume >= 20:
-					colour = colours.mode_button_active
+					colour = md_active
 				elif bar == 3 and pctl.player_volume >= 30:
-					colour = colours.mode_button_active
+					colour = md_active
 				elif bar == 4 and pctl.player_volume >= 45:
-					colour = colours.mode_button_active
+					colour = md_active
 				elif bar == 5 and pctl.player_volume >= 55:
-					colour = colours.mode_button_active
+					colour = md_active
 				elif bar == 6 and pctl.player_volume >= 70:
-					colour = colours.mode_button_active
+					colour = md_active
 				elif bar == 7 and pctl.player_volume >= 95:
-					colour = colours.mode_button_active
+					colour = md_active
 
 				ddt.rect(rect, colour)
 				x += spacing
@@ -32681,7 +32739,7 @@ class BottomBarType1:
 
 			ddt.rect_a(
 				(self.volume_bar_position[0] - right_offset, self.volume_bar_position[1]),
-				self.volume_bar_size, colours.volume_bar_background)  # 22
+				self.volume_bar_size, volume_bg)  # 22
 
 			gui.volume_bar_rect = (
 				self.volume_bar_position[0] - right_offset, self.volume_bar_position[1],
@@ -32856,23 +32914,23 @@ class BottomBarType1:
 			if window_size[0] < 650 * gui.scale:
 				compact = True
 
-			play_colour = colours.media_buttons_off
-			pause_colour = colours.media_buttons_off
-			stop_colour = colours.media_buttons_off
-			forward_colour = colours.media_buttons_off
-			back_colour = colours.media_buttons_off
+			play_colour = mb_off
+			pause_colour = mb_off
+			stop_colour = mb_off
+			forward_colour = mb_off
+			back_colour = mb_off
 
 			if pctl.playing_state == PlayingState.PLAYING:
-				play_colour = colours.media_buttons_active
+				play_colour = mb_active
 
 			if pctl.stop_mode != StopMode.OFF:
-				stop_colour = colours.media_buttons_active
+				stop_colour = mb_active
 
 			if pctl.playing_state == PlayingState.PAUSED:
-				pause_colour = colours.media_buttons_active
-				play_colour = colours.media_buttons_active
+				pause_colour = mb_active
+				play_colour = mb_active
 			elif pctl.playing_state == PlayingState.URL_STREAM:
-				play_colour = colours.media_buttons_active
+				play_colour = mb_active
 				if tauon.stream_proxy.encode_running:
 					play_colour = ColourRGBA(220, 50, 50, 255)
 
@@ -32882,7 +32940,7 @@ class BottomBarType1:
 				50 * gui.scale, 40 * gui.scale)
 				self.fields.add(rect)
 				if self.coll(rect):
-					play_colour = colours.media_buttons_over
+					play_colour = mb_over
 					if inp.mouse_click:
 						if compact and pctl.playing_state == PlayingState.PLAYING:
 							pctl.pause()
@@ -32911,7 +32969,7 @@ class BottomBarType1:
 				rect = (x - 15 * gui.scale, y - 13 * gui.scale, 50 * gui.scale, 40 * gui.scale)
 				self.fields.add(rect)
 				if self.coll(rect) and pctl.playing_state != PlayingState.URL_STREAM:
-					pause_colour = colours.media_buttons_over
+					pause_colour = mb_over
 					if inp.mouse_click:
 						pctl.pause()
 					if inp.right_click:
@@ -32927,7 +32985,7 @@ class BottomBarType1:
 			rect = (x - 14 * gui.scale, y - 13 * gui.scale, 50 * gui.scale, 40 * gui.scale)
 			self.fields.add(rect)
 			if self.coll(rect):
-				stop_colour = colours.media_buttons_over
+				stop_colour = mb_over
 				if inp.mouse_click:
 					pctl.stop()
 				if inp.right_click:
@@ -32946,7 +33004,7 @@ class BottomBarType1:
 					50 * gui.scale, 35 * gui.scale)
 			self.fields.add(rect)
 			if self.coll(rect) and pctl.playing_state != PlayingState.URL_STREAM:
-				forward_colour = colours.media_buttons_over
+				forward_colour = mb_over
 				if inp.mouse_click:
 					pctl.advance()
 					gui.tool_tip_lock_off_f = True
@@ -32981,7 +33039,7 @@ class BottomBarType1:
 					50 * gui.scale, 35 * gui.scale)
 			self.fields.add(rect)
 			if self.coll(rect) and pctl.playing_state != PlayingState.URL_STREAM:
-				back_colour = colours.media_buttons_over
+				back_colour = mb_over
 				if inp.mouse_click:
 					pctl.back()
 					gui.tool_tip_lock_off_b = True
@@ -33012,19 +33070,19 @@ class BottomBarType1:
 
 			x = window_size[0] - 252 * gui.scale - right_offset
 			y = window_size[1] - round(26 * gui.scale)
-			rpbc = colours.mode_button_off
+			rpbc = md_off
 			rect = (x - 9 * gui.scale, y - 5 * gui.scale, 40 * gui.scale, 25 * gui.scale)
 			self.fields.add(rect)
 			if self.coll(rect):
 				if not tauon.extra_menu.active:
 					tauon.tool_tip.test(x, y - 28 * gui.scale, _("Playback menu"))
-				rpbc = colours.mode_button_over
+				rpbc = md_over
 				if inp.mouse_click:
 					tauon.extra_menu.activate(position=(x - 115 * gui.scale, y - 6 * gui.scale), bottom_anchor=True)
 				elif inp.right_click:
 					tauon.mode_menu.activate(position=(x - 115 * gui.scale, y - 6 * gui.scale))
 			if tauon.extra_menu.active:
-				rpbc = colours.mode_button_active
+				rpbc = md_active
 
 			spacing = round(5 * gui.scale)
 			ddt.rect_a((x, y), (24 * gui.scale, 2 * gui.scale), rpbc)
@@ -33042,7 +33100,7 @@ class BottomBarType1:
 				rect = (x - 5 * gui.scale, y - 5 * gui.scale, 60 * gui.scale, 25 * gui.scale)
 				self.fields.add(rect)
 
-				rpbc = colours.mode_button_off
+				rpbc = md_off
 				off = True
 				if (inp.mouse_click or inp.right_click) and self.coll(rect):
 					if inp.mouse_click:
@@ -33054,24 +33112,24 @@ class BottomBarType1:
 						tauon.shuffle_menu.activate(position=(x + 30 * gui.scale, y - 7 * gui.scale))
 
 				if pctl.random_mode:
-					rpbc = colours.mode_button_active
+					rpbc = md_active
 					off = False
 					if self.coll(rect):
 						tauon.tool_tip.test(x, y - 28 * gui.scale, _("Shuffle"))
 				elif self.coll(rect):
 					tauon.tool_tip.test(x, y - 28 * gui.scale, _("Shuffle"))
 					if self.random_click_off is True:
-						rpbc = colours.mode_button_off
+						rpbc = md_off
 					elif pctl.random_mode is True:
-						rpbc = colours.mode_button_active
+						rpbc = md_active
 					else:
-						rpbc = colours.mode_button_over
+						rpbc = md_over
 				else:
 					self.random_click_off = False
 
 				# Keep hover highlight on if menu is open
 				if tauon.shuffle_menu.active and not pctl.random_mode:
-					rpbc = colours.mode_button_over
+					rpbc = md_over
 
 				#self.shuffle_button.render(x + round(1 * gui.scale), y + round(1 * gui.scale), rpbc)
 
@@ -33095,7 +33153,7 @@ class BottomBarType1:
 				x = window_size[0] - round(380 * gui.scale) - right_offset
 				y = window_size[1] - round(27 * gui.scale)
 
-				rpbc = colours.mode_button_off
+				rpbc = md_off
 				off = True
 
 				rect = (x - 6 * gui.scale, y - 5 * gui.scale, 61 * gui.scale, 25 * gui.scale)
@@ -33112,7 +33170,7 @@ class BottomBarType1:
 						#     self.repeat_click_off = True
 
 				if pctl.repeat_mode:
-					rpbc = colours.mode_button_active
+					rpbc = md_active
 					off = False
 					if self.coll(rect):
 						if pctl.album_repeat_mode:
@@ -33129,17 +33187,17 @@ class BottomBarType1:
 							tauon.tool_tip.test(x, y - 28 * gui.scale, _("Repeat track"))
 
 					if self.repeat_click_off is True:
-						rpbc = colours.mode_button_off
+						rpbc = md_off
 					elif pctl.repeat_mode is True:
-						rpbc = colours.mode_button_active
+						rpbc = md_active
 					else:
-						rpbc = colours.mode_button_over
+						rpbc = md_over
 				else:
 					self.repeat_click_off = False
 
 				# Keep hover highlight on if menu is open
 				if tauon.repeat_menu.active and not pctl.repeat_mode:
-					rpbc = colours.mode_button_over
+					rpbc = md_over
 
 				rpbc = alpha_blend(rpbc, colours.bottom_panel_colour)  # bake in alpha in case of overlap
 
