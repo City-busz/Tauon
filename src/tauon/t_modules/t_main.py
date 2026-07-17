@@ -23854,6 +23854,10 @@ class StyleOverlay:
 		sample = self.sample_a
 		if sample is None or self.a_rect is None or not self.gui.have_art_bg:
 			return None
+		# Offscreen Custom Layout widgets draw in a local space at the
+		# scratch origin; map to true window coordinates so they sample
+		# the art actually behind them
+		x, y = self.tauon.inp.to_screen(x, y)
 		fx = min(1.0, max(0.0, (x - self.a_rect.x) / max(1.0, self.a_rect.w)))
 		fy = min(1.0, max(0.0, (y - self.a_rect.y) / max(1.0, self.a_rect.h)))
 		w, h = sample.size
@@ -23902,7 +23906,7 @@ class StyleOverlay:
 
 	def tint_from_background(
 		self, colour: ColourRGBA, x: float, y: float, amount: float = 0.15,
-		panel: ColourRGBA | None = None,
+		panel: ColourRGBA | None = None, boost: float = 1.0,
 	) -> ColourRGBA:
 		"""Mix a little of the background art's local hue/saturation into
 		colour (keeping its lightness and alpha), so grey furniture doesn't
@@ -23913,12 +23917,12 @@ class StyleOverlay:
 		the colour's lightness is also boosted away from the effective
 		backdrop — the panel blended over the local art — so buttons can't
 		land at the same lightness as the art behind them. The boost is
-		gentler below high art strength."""
-		return self.tint_from_sample(colour, self.sample_background(x, y), amount, panel)
+		gentler below high art strength; `boost` scales it further."""
+		return self.tint_from_sample(colour, self.sample_background(x, y), amount, panel, boost)
 
 	def tint_from_sample(
 		self, colour: ColourRGBA, sample: ColourRGBA | None, amount: float = 0.15,
-		panel: ColourRGBA | None = None,
+		panel: ColourRGBA | None = None, boost: float = 1.0,
 	) -> ColourRGBA:
 		"""tint_from_background against an already-sampled background colour
 		(e.g. the averaged tracklist sample)."""
@@ -23935,7 +23939,7 @@ class StyleOverlay:
 				round(panel.g * f + sample.g * (1 - f)),
 				round(panel.b * f + sample.b * (1 - f)), 255)
 			floor = 0.18 if self.prefs.art_bg_stronger >= 3 else 0.12
-			colour = hls_pull_contrast(colour, backdrop, floor * strength)
+			colour = hls_pull_contrast(colour, backdrop, floor * strength * boost)
 		return colour
 
 	def display(self, background: bool = False) -> None:
@@ -32473,7 +32477,7 @@ class BottomBarType1:
 			colours.seek_bar_background,
 			self.seek_bar_position[0] + self.seek_bar_size[0] / 2,
 			self.seek_bar_position[1] + self.seek_bar_size[1] / 2,
-			panel=colours.bottom_panel_colour)
+			panel=colours.bottom_panel_colour, boost=0.6)
 		volume_bg = so.tint_from_background(
 			colours.volume_bar_background,
 			self.volume_bar_position[0] + self.volume_bar_size[0] / 2,
@@ -36470,11 +36474,21 @@ class StandardPlaylist:
 		gui = self.gui
 		if self._clip_rect is not None:
 			cx, cy, cw, ch = self._clip_rect
+			bar_top = cy
 		else:
 			cx = gui.playlist_left
 			cy = gui.panelY
 			cw = gui.plw
 			ch = self.window_size[1] - gui.panelY - gui.panelBY
+			bar_top = cy
+			if gui.artist_info_panel:
+				bar_top += gui.artist_panel_height
+		# The columns header bar draws translucent over the art background,
+		# so rows scrolled up behind it would show through; crop them out
+		if gui.set_mode and gui.set_bar and not gui.combo_mode:
+			cut = bar_top + gui.set_height - cy
+			cy += cut
+			ch -= cut
 		r = sdl3.SDL_FRect(round(cx), round(cy), round(cw), round(ch))
 		sdl3.SDL_RenderTexture(self.renderer, self.gui.tracklist_texture, r, r)
 
@@ -53786,6 +53800,11 @@ def main(holder: Holder) -> None:
 
 			start = x + gui.pl_st_left * gui.scale
 			c_width = width - gui.pl_st_left * gui.scale
+
+			# The column cells below re-fill the (translucent) bar colour on
+			# top of the base fill; give the lead-in strip before the first
+			# column the same second layer so it doesn't read brighter
+			ddt.rect((x, top, start - x, gui.set_height), c_bar_background)
 
 			run = 0
 
