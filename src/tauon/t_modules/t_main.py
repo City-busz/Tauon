@@ -23738,6 +23738,8 @@ class StyleOverlay:
 		self.stage: int = 0
 
 		self.im = None
+		# SDL surface decoded by the worker, awaiting texture upload
+		self.surface = None
 
 		self.a_texture = None
 		self.a_rect = None
@@ -23764,6 +23766,11 @@ class StyleOverlay:
 		# Averaged sample for the whole tracklist area, refreshed at the
 		# start of each tracklist render so all its text shares one tint
 		self.tracklist_sample: ColourRGBA | None = None
+
+		# Fade progress quantised into 8 steps: the tracklist only re-renders
+		# on step changes, and text colours only take 8 values per fade
+		# instead of a new cache entry every frame
+		self._fade_step: int = -1
 
 		self.go_to_sleep: bool = False
 
@@ -23801,6 +23808,13 @@ class StyleOverlay:
 					self.min_on_timer.force_set(-4)
 					return
 
+				# Decode to an SDL surface here on the worker thread; a
+				# full-size image decode on the main thread would hitch the
+				# start of the fade
+				self.surface = self.ddt.load_image(self.im)
+				self.im.close()
+				self.im = None
+
 				self.stage = 1
 				self.gui.request_frame()
 				return
@@ -23812,8 +23826,14 @@ class StyleOverlay:
 		if self.b_texture is not None:
 			sdl3.SDL_DestroyTexture(self.b_texture)
 			self.b_texture = None
+		if self.surface is not None:
+			sdl3.SDL_DestroySurface(self.surface)
+			self.surface = None
 		self.sample_a = None
 		self.sample_b = None
+		self._fade_step = -1
+		# Drop any baked-in tints from the tracklist
+		self.gui.request_tracklist_redraw()
 		self.min_on_timer.force_set(-0.2)
 		self.parent_path = "None"
 		self.stage = 0
@@ -23842,7 +23862,7 @@ class StyleOverlay:
 		if t < 0.4 and self.sample_b is not None:
 			w2, h2 = self.sample_b.size
 			r2, g2, b2 = self.sample_b.getpixel((int(fx * (w2 - 1)), int(fy * (h2 - 1))))[:3]
-			f = min(1.0, max(0.0, t / 0.4))
+			f = min(1.0, max(0.0, int(t / 0.4 * 8) / 8))
 			r = round(r2 + (r - r2) * f)
 			g = round(g2 + (g - g2) * f)
 			b = round(b2 + (b - b2) * f)
@@ -23869,14 +23889,15 @@ class StyleOverlay:
 
 		Ramps up with the art fade-in when there is no previous art to
 		crossfade from, and back down with the fade-out, so tinted/boosted
-		colours track the background's actual visibility."""
+		colours track the background's actual visibility. Quantised to the
+		same 8 steps as the sample crossfade."""
 		if self.go_to_sleep:
 			t = self.fade_off_timer.get()
 			if t > 1:
-				return max(0.0, 1.0 - (t - 1) / 0.4)
+				return max(0.0, 1.0 - int(min(0.4, t - 1) / 0.4 * 8) / 8)
 			return 1.0
 		if self.sample_b is None:
-			return min(1.0, max(0.0, self.fade_on_timer.get() / 0.4))
+			return min(1.0, int(max(0.0, self.fade_on_timer.get()) / 0.4 * 8) / 8)
 		return 1.0
 
 	def tint_from_background(
@@ -23930,26 +23951,33 @@ class StyleOverlay:
 		if self.min_on_timer.get() < 0:
 			return
 
+		if self.stage == 1 and self.surface is None:
+			# Flushed between the worker's decode and the upload; start over
+			self.stage = 0
+
 		if self.stage == 1:
 
-			s_image = self.ddt.load_image(self.im)
+			# The surface was decoded on the worker thread; only the texture
+			# upload happens here. (Streaming the upload in strips across
+			# frames was tried and made things worse: on Metal every
+			# mid-frame SDL_UpdateTexture splits the render pass, turning
+			# one stall into many.)
+			surf = self.surface.contents
 
-			c = sdl3.SDL_CreateTextureFromSurface(self.renderer, s_image)
-
-			tex_w = pointer(c_float(0))
-			tex_h = pointer(c_float(0))
-			sdl3.SDL_GetTextureSize(c, tex_w, tex_h)
+			c = sdl3.SDL_CreateTextureFromSurface(self.renderer, self.surface)
 
 			dst = sdl3.SDL_FRect(-40)
-			dst.w = int(tex_w.contents.value)
-			dst.h = int(tex_h.contents.value)
+			dst.w = surf.w
+			dst.h = surf.h
 
-			# Clean uo
-			sdl3.SDL_DestroySurface(s_image)
-			self.im.close()
+			sdl3.SDL_DestroySurface(self.surface)
+			self.surface = None
 
-			# sdl3.SDL_SetTextureAlphaMod(c, 10)
 			self.fade_on_timer.set()
+			# Step 0 of the colour crossfade reproduces the on-screen
+			# colours; skip its tracklist redraw — this frame already
+			# carries the texture upload
+			self._fade_step = 0
 
 			if self.a_texture is not None:
 				self.b_texture = self.a_texture
@@ -24007,10 +24035,15 @@ class StyleOverlay:
 					sdl3.SDL_SetTextureAlphaMod(self.b_texture, 255)
 				sdl3.SDL_RenderTexture(self.renderer, self.b_texture, None, self.b_rect)
 
-			else:
+			elif t > 0.55:
+				# Deferred a beat past the fade's end: releasing a large
+				# texture on the same frame the animation lands is a
+				# visible hitch
 				sdl3.SDL_DestroyTexture(self.b_texture)
 				self.b_texture = None
 				self.b_rect = None
+			else:
+				self.gui.request_frame()
 
 		if self.a_texture is not None:
 
@@ -24021,16 +24054,28 @@ class StyleOverlay:
 				self.gui.request_frame()
 				# Tracklist text colours derived from the background are
 				# baked into its cached texture; re-render it through the
-				# fade so they follow the transition
-				self.gui.request_tracklist_redraw()
+				# fade, but only at each quantised colour step
+				step = int(t / 0.4 * 8)
+				if step != self._fade_step:
+					self._fade_step = step
+					self.gui.request_tracklist_redraw()
 
 			else:
 				fade = 255
+				if self._fade_step != -1:
+					# One last re-render at the fade's final colours
+					self._fade_step = -1
+					self.gui.request_tracklist_redraw()
 
 			if self.go_to_sleep:
 				t = self.fade_off_timer.get()
 				self.gui.request_frame()
-				self.gui.request_tracklist_redraw()
+				# Colour adjustments only ramp down in the 1..1.4 stretch
+				if t > 1:
+					step = int(min(0.4, t - 1) / 0.4 * 8)
+					if step != self._fade_step:
+						self._fade_step = step
+						self.gui.request_tracklist_redraw()
 
 				if t < 1:
 					fade = 255
