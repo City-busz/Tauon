@@ -14809,7 +14809,14 @@ class Tauon:
 				sdl3.SDL_RenderClear(renderer)
 				# Premultiplied src-over: the texture holds premultiplied
 				# content (see creation site in main())
-				sdl3.SDL_SetTextureBlendMode(gui.tracklist_texture, self.ddt.text_blend_mode)
+				sdl3.SDL_SetTextureBlendMode(gui.tracklist_texture, sdl3.SDL_ComposeCustomBlendMode(
+					sdl3.SDL_BLENDFACTOR_ONE,
+					sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+					sdl3.SDL_BLENDOPERATION_ADD,
+					sdl3.SDL_BLENDFACTOR_ONE,
+					sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+					sdl3.SDL_BLENDOPERATION_ADD,
+				))
 
 				# sdl3.SDL_SetRenderTarget(renderer, gui.main_texture)
 				# sdl3.SDL_RenderClear(renderer)

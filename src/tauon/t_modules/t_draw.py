@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import sdl3
 from PIL import Image
 
-from tauon.t_modules.t_extra import ColourRGBA, Timer
+from tauon.t_modules.t_extra import ColourRGBA, Timer, alpha_blend, coll_rect
 
 if TYPE_CHECKING:
 	from io import BytesIO
@@ -131,6 +131,7 @@ class TDraw:
 		# All
 		self.renderer = renderer
 		self.scale = 1
+		self.force_subpixel_text = False
 
 		# Drawing
 		self.sdlrect = sdl3.SDL_FRect(10.0, 10.0, 10.0, 10.0)
@@ -148,33 +149,16 @@ class TDraw:
 		self.layout = PangoCairo.create_layout(self.context)
 		self.draw_layout = PangoCairo.create_layout(self.context)
 
-		# Text is always rendered on a transparent background and
-		# alpha-composited; these are still assigned (and text_background_colour
-		# read back to derive colours) by UI code, but the renderer ignores them.
 		self.text_background_colour = ColourRGBA(0, 0, 0, 255)
 		self.pretty_rect: tuple[int, int, int, int] | None = None
 		self.real_bg: bool = False
 		self.alpha_bg: bool = False
 		self.force_gray: bool = False
-		self.force_subpixel_text = False
-
-		# Text textures hold premultiplied alpha (cairo ARGB32), so composite
-		# with src-over in premultiplied form; SDL_BLENDMODE_BLEND would
-		# multiply by alpha a second time.
-		self.text_blend_mode = sdl3.SDL_ComposeCustomBlendMode(
-			sdl3.SDL_BLENDFACTOR_ONE,
-			sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-			sdl3.SDL_BLENDOPERATION_ADD,
-			sdl3.SDL_BLENDFACTOR_ONE,
-			sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-			sdl3.SDL_BLENDOPERATION_ADD,
-		)
-
 		self.f_dict: dict[float, tuple[str, int, float]] = {}
 		self.font_desc_cache: dict[float, Pango.FontDescription] = {}
 		# Rendered-text textures, in LRU order (oldest first).
 		self.ttc: OrderedDict[
-			tuple[str | int, ...],
+			tuple[int, str, int, int, int, int, int, int, int, int],
 			list[sdl3.SDL_FRect | sdl3.LP_SDL_Texture | int | bool],
 		] = OrderedDict()
 		# The item cap is recomputed every frame (see new_frame) to fit the text
@@ -369,6 +353,27 @@ class TDraw:
 				self.text_wh_cache.popitem(last=False)
 		return result
 
+	def get_y_offset(self, text: str, font: int, max_x: int, wrap: bool = False) -> int:
+		"""HACKY"""
+		self.layout.set_font_description(self._font_description(font))
+		self.layout.set_ellipsize(Pango.EllipsizeMode.END)
+		self.layout.set_width(max_x * 1000)
+		if wrap:
+			self.layout.set_height(20000 * 1000)
+		else:
+			self.layout.set_height(0)
+
+		try:
+			self.layout.set_text(text, -1)
+		except Exception:
+			logging.exception(f"Exception in get_y_offset for: {text}")
+			self.layout.set_text(text.encode("utf-8", "replace").decode("utf-8"), -1)
+
+		y_off = self.layout.get_baseline() / 1000
+		y_off = round(round(y_off) - 13 * self.scale)  # 13 for compat with way text position used to work
+
+		return y_off
+
 	def __render_text(self, key: dict, x: int, y: int, range_top: int, range_height: int, align: int) -> None:
 		sd = key
 
@@ -410,21 +415,55 @@ class TDraw:
 		colour: ColourRGBA,
 		font: int,
 		max_x: int,
+		bg: ColourRGBA,
 		align: int = 0,
 		max_y: int | None = None,
 		wrap: bool = False,
 		range_top: int = 0,
 		range_height: int | None = None,
-		key: tuple[str | int, ...] | None = None,
+		real_bg: bool = False,
+		key: tuple[int, str, int, int, int, int, int, int, int, int] | None = None,
 	) -> int:
 		# perf.set()
+		force_cache = False
+		if key:
+			force_cache = True
+
 		self.was_truncated = False
 
 		max_x += 12  # Hack
 		max_x = round(max_x)
 
+		alpha_bg = self.alpha_bg
+		force_gray = self.force_gray
+		# real_bg = True
+
+		if bg.a < 246:
+			alpha_bg = True
+			force_gray = True
+
 		x = round(location[0])
 		y = round(location[1])
+
+		if self.pretty_rect:
+			w, h = self.get_text_wh(text, font, max_x, wrap)
+			quick_box = [x, y, w, h]
+
+			if align == 1:
+				quick_box[0] = x - quick_box[2]
+			elif align == 2:
+				quick_box[0] -= int(quick_box[2] / 2)
+
+			if coll_rect(self.pretty_rect, quick_box):
+				# self.rect_r(quick_box, [0, 0, 0, 100], True)
+				# if self.real_bg:
+				# real_bg = True
+				alpha_bg = True
+			else:
+				alpha_bg = False
+
+		if alpha_bg:
+			bg = ColourRGBA(0, 0, 0, 0)
 
 		if max_y is not None:
 			max_y = round(max_y)
@@ -433,26 +472,27 @@ class TDraw:
 			return 0
 
 		if key is None:
-			key = (max_x, text, font, colour.r, colour.g, colour.b, colour.a)
+			key = (max_x, text, font, colour.r, colour.g, colour.b, colour.a, bg.r, bg.g, bg.b)
 
-		if self._counting_tracklist:
-			self._tracklist_text_draws += 1
-		else:
-			self._frame_text_draws += 1
+		if not real_bg or force_cache:
+			if self._counting_tracklist:
+				self._tracklist_text_draws += 1
+			else:
+				self._frame_text_draws += 1
+			sd = self.ttc.get(key)
+			if sd:
+				sd[0].x = round(x)
+				sd[0].y = round(y) - sd[2]
 
-		sd = self.ttc.get(key)
-		if sd:
-			sd[0].x = round(x)
-			sd[0].y = round(y) - sd[2]
+				self.__render_text(sd, x, y, range_top, range_height, align)
+				self.ttc.move_to_end(key)
 
-			self.__render_text(sd, x, y, range_top, range_height, align)
-			self.ttc.move_to_end(key)
+				if wrap:
+					return sd[0].h
+				return sd[0].w
 
-			if wrap:
-				return sd[0].h
-			return sd[0].w
-
-		w, h = self.get_text_wh(text, font, max_x, wrap)
+		if not self.pretty_rect:  # Would have already done this if True
+			w, h = self.get_text_wh(text, font, max_x, wrap)
 
 		if w < 1:
 			return 0
@@ -466,6 +506,7 @@ class TDraw:
 			logging.info(f"Font not loaded: {font!s}")
 			return 10
 
+		format = sdl3.SDL_PIXELFORMAT_ARGB8888 if alpha_bg else sdl3.SDL_PIXELFORMAT_XRGB8888
 		surface = None
 		surface_locked = False
 		pixel_data = None
@@ -477,11 +518,33 @@ class TDraw:
 		y_off = 0
 
 		try:
-			surface = sdl3.SDL_CreateSurface(w, h, sdl3.SDL_PIXELFORMAT_ARGB8888)
-			if not surface:
-				logging.warning("SDL_CreateSurface failed while rendering text")
-				return 0
-			ctypes.memset(surface.contents.pixels, 0, surface.contents.pitch * h)
+			if real_bg:
+				box = sdl3.SDL_Rect(x, y - self.get_y_offset(text, font, max_x, wrap), w, h)
+
+				if align == 1:
+					box.x = x - box.w
+				elif align == 2:
+					box.x -= int(box.w / 2)
+
+				ssurf = sdl3.SDL_RenderReadPixels(self.renderer, box)
+				if not ssurf:
+					logging.warning("SDL_RenderReadPixels failed while rendering text background")
+					return 0
+
+				if ssurf.contents.format != format:
+					surface = sdl3.SDL_ConvertSurface(ssurf, format)
+					sdl3.SDL_DestroySurface(ssurf)
+					if not surface:
+						logging.warning("SDL_ConvertSurface failed while rendering text background")
+						return 0
+				else:
+					surface = ssurf
+			else:
+				surface = sdl3.SDL_CreateSurface(w, h, format)
+				if not surface:
+					logging.warning("SDL_CreateSurface failed while rendering text")
+					return 0
+				ctypes.memset(surface.contents.pixels, 0, surface.contents.pitch * h)
 
 			if not sdl3.SDL_LockSurface(surface):
 				logging.warning("SDL_LockSurface failed while rendering text")
@@ -492,16 +555,24 @@ class TDraw:
 			pixel_data = (ctypes.c_ubyte * pixel_size).from_address(surface.contents.pixels)
 			data = memoryview(pixel_data)
 
-			surf = cairo.ImageSurface.create_for_data(data, cairo.FORMAT_ARGB32, w, h, surface.contents.pitch)
+			if alpha_bg:
+				surf = cairo.ImageSurface.create_for_data(data, cairo.FORMAT_ARGB32, w, h, surface.contents.pitch)
+			else:
+				surf = cairo.ImageSurface.create_for_data(data, cairo.FORMAT_RGB24, w, h, surface.contents.pitch)
 
 			context = cairo.Context(surf)
 
-			# Subpixel AA needs per-channel coverage, which a single alpha
-			# channel can't carry, so grayscale AA is the only correct option
-			# on a transparent surface.
-			options = context.get_font_options()
-			options.set_antialias(cairo.ANTIALIAS_GRAY)
-			context.set_font_options(options)
+			if force_gray:
+				options = context.get_font_options()
+				options.set_antialias(cairo.ANTIALIAS_GRAY)
+				# options.set_hint_style(cairo.HINT_STYLE_NONE)
+				context.set_font_options(options)
+			elif self.force_subpixel_text:
+				options = context.get_font_options()
+				# options.set_antialias(cairo.ANTIALIAS_NONE)
+				# options.set_antialias(cairo.ANTIALIAS_GRAY)
+				options.set_antialias(cairo.ANTIALIAS_SUBPIXEL)
+				context.set_font_options(options)
 
 			layout = self.draw_layout
 			PangoCairo.update_layout(context, layout)
@@ -529,7 +600,14 @@ class TDraw:
 			# attrs.insert(Pango.Attribute(Pango.Underline.SINGLE))
 			# layout.set_attributes(attrs)
 
-			context.set_source_rgba(colour.r / 255, colour.g / 255, colour.b / 255, colour.a / 255)
+			context.rectangle(0, 0, w, h)
+
+			if not real_bg and not alpha_bg:
+				context.set_source_rgb(bg.r / 255, bg.g / 255, bg.b / 255)
+				# context.set_source_rgba(0, 0, 0, 0)
+				context.fill()
+
+			context.set_source_rgb(colour.r / 255, colour.g / 255, colour.b / 255)
 
 			# desc = Pango.FontDescription(self.f_dict[font][0])
 			# desc.set_family("Arial")
@@ -561,6 +639,12 @@ class TDraw:
 			sdl3.SDL_UnlockSurface(surface)
 			surface_locked = False
 
+			# Here the background colour is keyed out allowing lines to overlap slightly
+			if not real_bg and not alpha_bg:
+				format_details = sdl3.SDL_GetPixelFormatDetails(format)
+				ke = sdl3.SDL_MapRGB(format_details, None, bg.r, bg.g, bg.b)
+				sdl3.SDL_SetSurfaceColorKey(surface, True, ke)
+
 			c = sdl3.SDL_CreateTextureFromSurface(self.renderer, surface)
 			if not c:
 				logging.warning("SDL_CreateTextureFromSurface failed while rendering text")
@@ -569,7 +653,16 @@ class TDraw:
 			sdl3.SDL_DestroySurface(surface)
 			surface = None
 
-			sdl3.SDL_SetTextureBlendMode(c, self.text_blend_mode)
+			if alpha_bg:
+				blend_mode = sdl3.SDL_ComposeCustomBlendMode(
+					sdl3.SDL_BLENDFACTOR_ONE,
+					sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+					sdl3.SDL_BLENDOPERATION_ADD,
+					sdl3.SDL_BLENDFACTOR_ONE,
+					sdl3.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+					sdl3.SDL_BLENDOPERATION_ADD,
+				)
+				sdl3.SDL_SetTextureBlendMode(c, blend_mode)
 		finally:
 			layout = None
 			context = None
@@ -594,11 +687,13 @@ class TDraw:
 		try:
 			self.__render_text(pack, x, y, range_top, range_height, align)
 
-			self.ttc[key] = pack
-			texture_cached = True
-			while self.ttc and len(self.ttc) > self.max_text_texture_cache_items:
-				old_key, so = self.ttc.popitem(last=False)
-				sdl3.SDL_DestroyTexture(so[1])
+			# Don't cache if using real background data
+			if not real_bg:
+				self.ttc[key] = pack
+				texture_cached = True
+				while self.ttc and len(self.ttc) > self.max_text_texture_cache_items:
+					old_key, so = self.ttc.popitem(last=False)
+					sdl3.SDL_DestroyTexture(so[1])
 		finally:
 			if c is not None and not texture_cached:
 				sdl3.SDL_DestroyTexture(c)
@@ -618,16 +713,20 @@ class TDraw:
 		range_top: int = 0,
 		range_height: int | None = None,
 		real_bg: bool = False,
-		key: tuple[str | int, ...] | None = None,
+		key: tuple[int, str, int, int, int, int, int, int, int, int] | None = None,
 	) -> int | None:
-		"""Draw text at location. bg and real_bg are ignored; text is rendered
-		on a transparent background and alpha-composited over whatever is
-		beneath, so translucent colours blend correctly on the GPU."""
+		# logging.info((text, font))
+
 		if not text:
 			return 0
 
 		max_w = max(1, max_w)
 
+		if bg is None:
+			bg = self.text_background_colour
+
+		if colour.a != 255:
+			colour = alpha_blend(colour, bg)
 		align = 0
 		if len(location) > 2:
 			if location[2] == 1:
@@ -645,10 +744,11 @@ class TDraw:
 					colour,
 					font,
 					location[3],
+					bg,
 					max_y=max_h,
 					wrap=True,
 					range_top=range_top,
 					range_height=range_height,
 				)
 
-		return self.__draw_text_cairo(location, text, colour, font, max_w, align, key=key)
+		return self.__draw_text_cairo(location, text, colour, font, max_w, bg, align, real_bg=real_bg, key=key)
