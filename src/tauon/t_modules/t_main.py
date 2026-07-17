@@ -161,7 +161,6 @@ from tauon.t_modules.t_extra import (  # noqa: E402
 	fit_box,
 	folder_file_scan,
 	genre_correct,
-	get_artist_safe,
 	get_artist_strip_feat,
 	get_display_time,
 	get_filesize_string,
@@ -19029,7 +19028,6 @@ class Tauon:
 	def clear_img_cache(self, delete_disk: bool = True) -> None:
 		self.album_art_gen.clear_cache()
 		self.prefs.failed_artists.clear()
-		self.prefs.failed_background_artists.clear()
 		self.gall_ren.key_list = []
 
 		i = 0
@@ -19264,7 +19262,7 @@ class Tauon:
 			pctl.random_mode,
 			pctl.repeat_mode,
 			prefs.art_bg_stronger,
-			prefs.art_bg_always_blur,
+			None,  # was prefs.art_bg_always_blur
 			prefs.failed_artists,
 			prefs.artist_list,
 			None,  # prefs.auto_sort,
@@ -19300,8 +19298,8 @@ class Tauon:
 			self.playlist_box.scroll_on,
 			prefs.artist_list_sort_mode,
 			prefs.phazor_device_selected,
-			prefs.failed_background_artists,
-			prefs.bg_flips,
+			None,  # was prefs.failed_background_artists
+			None,  # was prefs.bg_flips
 			prefs.tray_show_title,
 			prefs.artist_list_style,
 			trackclass_jar,
@@ -19761,71 +19759,47 @@ class Tauon:
 		self.gui.request_tracklist_redraw()
 		return None
 
-	def toggle_auto_bg(self, mode: int= 0) -> bool | None:
+	def set_art_bg_off(self, mode: int = 0) -> bool | None:
 		if mode == 1:
-			return self.prefs.art_bg
-		self.prefs.art_bg ^= True
-		self.gui.update_layout = True  # Applies/removes panel translucency
-
-		if self.prefs.art_bg:
-			self.gui.request_frame()
-
+			return not self.prefs.art_bg
+		if not self.prefs.art_bg:
+			return None
+		self.prefs.art_bg = False
+		self.gui.update_layout = True  # Removes panel translucency
 		self.style_overlay.flush()
 		self.thread_manager.ready("style")
-		# if self.prefs.colour_from_image and self.prefs.art_bg and not self.inp.key_shift_down:
-		# 	toggle_auto_theme()
+		self.gui.request_frame()
 		return None
 
-	def toggle_auto_bg_strong(self, mode: int = 0) -> bool | None:
-		if mode == 1:
-			return self.prefs.art_bg_stronger == 2
+	def _set_art_bg(self, frosted: bool, stronger: int) -> None:
+		# The blur image only needs regenerating when the look changes;
+		# strength is applied at draw time via panel translucency
+		regenerate = not self.prefs.art_bg or self.prefs.art_bg_frosted != frosted
+		self.prefs.art_bg = True
+		self.prefs.art_bg_frosted = frosted
+		self.prefs.art_bg_stronger = stronger
+		self.gui.update_layout = True  # Applies panel translucency at the new level
+		if regenerate:
+			self.style_overlay.flush()
+			self.thread_manager.ready("style")
+		self.gui.request_frame()
 
-		if self.prefs.art_bg_stronger == 2:
-			self.prefs.art_bg_stronger = 1
-		else:
-			self.prefs.art_bg_stronger = 2
-		self.gui.update_layout = True
+	def set_art_bg_clear(self, mode: int = 0) -> bool | None:
+		if mode == 1:
+			return self.prefs.art_bg and not self.prefs.art_bg_frosted
+		self._set_art_bg(frosted=False, stronger=1)
 		return None
 
-	def toggle_auto_bg_strong1(self, mode: int = 0) -> bool | None:
+	def set_art_bg_frosted_low(self, mode: int = 0) -> bool | None:
 		if mode == 1:
-			return self.prefs.art_bg_stronger == 1
-		self.prefs.art_bg_stronger = 1
-		self.gui.update_layout = True
+			return self.prefs.art_bg and self.prefs.art_bg_frosted and self.prefs.art_bg_stronger < 3
+		self._set_art_bg(frosted=True, stronger=1)
 		return None
 
-	def toggle_auto_bg_strong2(self, mode: int = 0) -> bool | None:
+	def set_art_bg_frosted_high(self, mode: int = 0) -> bool | None:
 		if mode == 1:
-			return self.prefs.art_bg_stronger == 2
-		self.prefs.art_bg_stronger = 2
-		self.gui.update_layout = True
-		if self.prefs.art_bg:
-			self.gui.request_frame()
-		return None
-
-	def toggle_auto_bg_strong3(self, mode: int = 0) -> bool | None:
-		if mode == 1:
-			return self.prefs.art_bg_stronger == 3
-		self.prefs.art_bg_stronger = 3
-		self.gui.update_layout = True
-		if self.prefs.art_bg:
-			self.gui.request_frame()
-		return None
-
-	def toggle_auto_bg_blur(self, mode: int = 0) -> bool | None:
-		if mode == 1:
-			return self.prefs.art_bg_always_blur
-		self.prefs.art_bg_always_blur ^= True
-		self.style_overlay.flush()
-		self.thread_manager.ready("style")
-		return None
-
-	def toggle_auto_bg_frosted(self, mode: int = 0) -> bool | None:
-		if mode == 1:
-			return self.prefs.art_bg_frosted
-		self.prefs.art_bg_frosted ^= True
-		self.style_overlay.flush()
-		self.thread_manager.ready("style")
+			return self.prefs.art_bg and self.prefs.art_bg_frosted and self.prefs.art_bg_stronger >= 3
+		self._set_art_bg(frosted=True, stronger=3)
 		return None
 
 	def toggle_notifications(self, mode: int = 0) -> bool | None:
@@ -22538,7 +22512,6 @@ class AlbumArt:
 
 		self.blur_texture = None
 		self.blur_rect = None
-		self.loaded_bg_type: int = 0
 
 		self.download_in_progress: bool = False
 		self.downloaded_image = None
@@ -22951,98 +22924,16 @@ class AlbumArt:
 		self.processing64on = None
 		return sss
 
-	def get_background(self, track: TrackClass) -> BytesIO | BufferedReader | None:
-		#logging.info("Find background...")
-		# Determine artist name to use
-		artist = get_artist_safe(track)
-		if not artist:
-			return None
-
-		# Check cache for existing image
-		path = os.path.join(self.b_cache_directory, artist)
-		if os.path.isfile(path):
-			logging.info("Load cached background")
-			return open(path, "rb")
-
-		# Try last.fm background
-		path = self.tauon.artist_info_box.get_data(artist, get_img_path=True)
-		if os.path.isfile(path):
-			logging.info("Load cached background lfm")
-			return open(path, "rb")
-
-		# Check we've not already attempted a search for this artist
-		if artist in self.prefs.failed_background_artists:
-			return None
-
-		# Get artist MBID
-		try:
-			s = musicbrainzngs.search_artists(artist, limit=1)
-			artist_id = s["artist-list"][0]["id"]
-		except Exception:
-			logging.exception(f"Failed to find artist MBID for: {artist}")
-			self.prefs.failed_background_artists.append(artist)
-			return None
-
-		# Search fanart.tv for background
-		try:
-			r = requests.get(
-				"https://webservice.fanart.tv/v3/music/" \
-				+ artist_id + "?api_key=" + self.prefs.fatvap, timeout=(4, 10))
-
-			artlink = r.json()["artistbackground"][0]["url"]
-
-			response = urllib.request.urlopen(artlink, context=self.tls_context)
-			info = response.info()
-
-			assert info.get_content_maintype() == "image"
-
-			t = io.BytesIO()
-			t.seek(0)
-			t.write(response.read())
-			t.seek(0, 2)
-			l = t.tell()
-			t.seek(0)
-
-			assert l > 1000
-
-			# Cache image for future use
-			path = os.path.join(self.a_cache_directory, artist + "-ftv-full.jpg")
-			with open(path, "wb") as f:
-				f.write(t.read())
-			t.seek(0)
-			return t
-
-		except Exception:
-			logging.exception(f"Failed to find fanart background for: {artist}")
-			if not self.gui.artist_info_panel:
-				self.tauon.artist_info_box.get_data(artist)
-				path = self.tauon.artist_info_box.get_data(artist, get_img_path=True)
-				if os.path.isfile(path):
-					logging.debug("Downloaded background lfm")
-					return open(path, "rb")
-
-
-			self.prefs.failed_background_artists.append(artist)
-			return None
-
 	def get_blur_im(self, track: TrackClass) -> BytesIO | bool | None:
-		source_image = None
-		self.loaded_bg_type = 0
-		if self.prefs.enable_fanart_bg:
-			source_image = self.get_background(track)
-			if source_image:
-				self.loaded_bg_type = 1
+		filepath = track.fullpath
+		sources = self.get_sources(track)
 
-		if source_image is None:
-			filepath = track.fullpath
-			sources = self.get_sources(track)
+		if len(sources) == 0:
+			return False
 
-			if len(sources) == 0:
-				return False
+		offset = self.get_offset(filepath, sources)
 
-			offset = self.get_offset(filepath, sources)
-
-			source_image = self.get_source_raw(offset, sources, track)
+		source_image = self.get_source_raw(offset, sources, track)
 
 		if source_image is None:
 			return None
@@ -23073,18 +22964,9 @@ class AlbumArt:
 
 		im = im.resize((new_x, new_y))
 
-		if self.loaded_bg_type == 1:
-			artist = get_artist_safe(track)
-			if artist and artist in self.prefs.bg_flips:
-				im = im.transpose(Image.FLIP_LEFT_RIGHT)
-
-		frosted = self.prefs.art_bg_frosted and self.gui.mode != GuiMode.MINI
-
-		if (ox_size < 500 or self.prefs.art_bg_always_blur) or self.gui.mode == GuiMode.MINI or frosted:
+		if self.gui.mode == GuiMode.MINI:
 			blur = self.prefs.art_bg_blur
-			if frosted:
-				blur = max(blur, 60)
-			if self.prefs.mini_mode_mode == MiniModeMode.SLATE and self.gui.mode == GuiMode.MINI:
+			if self.prefs.mini_mode_mode == MiniModeMode.SLATE:
 				blur = 160
 				pix = im.getpixel((new_x // 2, new_y // 4 * 3))
 				pixel_sum = sum(pix) / (255 * 3)
@@ -23097,15 +22979,18 @@ class AlbumArt:
 				self.gui.center_blur_pixel = im.getpixel((new_x // 2, new_y // 4 * 3))
 
 			im = im.filter(ImageFilter.GaussianBlur(blur))
-
-		if frosted:
-			# Frosted glass / sandblasted: mute the colour, then add fine
-			# monochrome grain (noise is mean-128, so adding with -128 offset
-			# leaves brightness unchanged)
+		elif self.prefs.art_bg_frosted:
+			# Frosted glass / sandblasted: heavy blur, mute the colour, then
+			# add fine monochrome grain (noise is mean-128, so adding with
+			# -128 offset leaves brightness unchanged)
+			im = im.filter(ImageFilter.GaussianBlur(max(self.prefs.art_bg_blur, 60)))
 			im = ImageEnhance.Color(im).enhance(0.7)
 			grain = Image.effect_noise(im.size, 10).convert("L")
 			grain = Image.merge("RGB", (grain, grain, grain))
 			im = ImageChops.add(im, grain, 1.0, -128)
+		elif ox_size < 500:
+			# Clear look; still soften low-res art to hide scaling artifacts
+			im = im.filter(ImageFilter.GaussianBlur(self.prefs.art_bg_blur))
 
 
 		self.gui.center_blur_pixel = im.getpixel((new_x // 2, new_y // 2))
@@ -23803,8 +23688,6 @@ class StyleOverlay:
 		self.b_texture = None
 		self.b_rect = None
 
-		self.a_type = 0
-		self.b_type = 0
 
 		self.window_size_int = None
 		self.parent_path = None
@@ -23934,11 +23817,9 @@ class StyleOverlay:
 			if self.a_texture is not None:
 				self.b_texture = self.a_texture
 				self.b_rect = self.a_rect
-				self.b_type = self.a_type
 
 			self.a_texture = c
 			self.a_rect = dst
-			self.a_type = self.album_art_gen.loaded_bg_type
 			self.sample_a = self.sample_source
 
 			self.stage = 2
@@ -23980,8 +23861,6 @@ class StyleOverlay:
 		if self.b_texture is not None:
 
 			self.b_rect.y = 0 - self.b_rect.h // 4
-			if self.b_type == 1:
-				self.b_rect.y = 0
 
 			if t < 0.4:
 				if background:
@@ -23998,8 +23877,6 @@ class StyleOverlay:
 		if self.a_texture is not None:
 
 			self.a_rect.y = 0 - self.a_rect.h // 4
-			if self.a_type == 1:
-				self.a_rect.y = 0
 
 			if t < 0.4:
 				fade = round(t / 0.4 * 255)
@@ -29011,7 +28888,8 @@ class Over:
 		preset_columns = max(1, min(theme_count, (right_inner_w + preset_gap) // max(preset_w + preset_gap, 1)))
 		preset_rows = max(1, math.ceil(theme_count / preset_columns))
 		preset_grid_h = preset_rows * preset_h + max(0, preset_rows - 1) * preset_gap
-		left_min_h = round(80 * gui.scale) + row_h * 6 + row_gap * 5
+		# Label + segmented bar (20 + 32), then the auto-theme switch row
+		left_min_h = round(80 * gui.scale) + round(52 * gui.scale) + row_gap + row_h
 		right_min_h = round(132 * gui.scale) + preset_grid_h + row_gap * 3 + action_h + row_h
 		card_h = max(left_min_h, right_min_h)
 		left_rect = (x, y, left_w, card_h)
@@ -29025,23 +28903,20 @@ class Over:
 			_("Artwork and automatic theme changes."),
 			accent,
 		)
-		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_bg, _("Use album art as background"), accent=accent)
-		inner_y += row_h + row_gap
-		old_fanart = prefs.enable_fanart_bg
-		prefs.enable_fanart_bg = self.settings_switch_row((inner_x, inner_y, inner_w, row_h), prefs.enable_fanart_bg, _("Prefer artist backgrounds"), accent=accent)
-		if prefs.enable_fanart_bg and prefs.enable_fanart_bg != old_fanart and not prefs.auto_dl_artist_data:
-			prefs.auto_dl_artist_data = True
-			self.show_message(
-				_("Also enabling 'auto-fetch artist data' to scrape last.fm."),
-				_("You can toggle this back off under Settings > General"),
-			)
-		inner_y += row_h + row_gap
-		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_bg_strong, _("Stronger background"), accent=accent)
-		inner_y += row_h + row_gap
-		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_bg_blur, _("Blur background"), accent=accent)
-		inner_y += row_h + row_gap
-		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_bg_frosted, _("Frosted glass look"), accent=accent)
-		inner_y += row_h + row_gap
+		self.ddt.text((inner_x, inner_y), _("Album art as background"), self.colours.box_text_label, 11)
+		inner_y += round(20 * gui.scale)
+		bar_h = self.settings_segmented_bar(
+			(inner_x, inner_y),
+			(
+				(_("Off"), self.tauon.set_art_bg_off(1), self.tauon.set_art_bg_off),
+				(_("Clear"), self.tauon.set_art_bg_clear(1), self.tauon.set_art_bg_clear),
+				(_("Frosted low"), self.tauon.set_art_bg_frosted_low(1), self.tauon.set_art_bg_frosted_low),
+				(_("Frosted high"), self.tauon.set_art_bg_frosted_high(1), self.tauon.set_art_bg_frosted_high),
+			),
+			accent,
+			width=inner_w,
+		)
+		inner_y += bar_h + row_gap
 		self.settings_switch_row((inner_x, inner_y, inner_w, row_h), self.tauon.toggle_auto_theme, _("Auto-theme from album art"), accent=accent)
 
 		inner_x, inner_y, inner_w, section_h = self.draw_settings_section(
@@ -29840,24 +29715,9 @@ class Over:
 			return total_h
 
 		if view == 4:
-			card_h = round(240 * gui.scale)
+			card_h = round(200 * gui.scale)
 			if not draw:
 				return card_h
-
-			def flip_current_artist() -> None:
-				if self.inp.key_shift_down:
-					prefs.bg_flips.clear()
-					self.show_message(_("Reset flips"), mode="done")
-					return
-				track = self.pctl.playing_object()
-				artist = get_artist_safe(track)
-				if artist:
-					if artist not in prefs.bg_flips:
-						prefs.bg_flips.add(artist)
-					else:
-						prefs.bg_flips.remove(artist)
-					tauon.style_overlay.flush()
-				self.show_message(_("OK"), mode="done")
 
 			rect = (x, y, w, card_h)
 			inner_x, inner_y, inner_w, inner_h = self.draw_settings_section(
@@ -29885,14 +29745,6 @@ class Over:
 				prefs.enable_fanart_artist,
 				_("Artist images (automatic)"),
 				accent=accent,
-			)
-			inner_y += row_h + row_gap
-			self.draw_settings_action_row(
-				(inner_x, inner_y, inner_w, action_h),
-				[
-					(_("Flip current"), flip_current_artist, True),
-				],
-				accent,
 			)
 			return card_h
 
@@ -46784,7 +46636,6 @@ def save_prefs(bag: Bag) -> None:
 
 	cf.update_value("fanart.tv-cover", prefs.enable_fanart_cover)
 	cf.update_value("fanart.tv-artist", prefs.enable_fanart_artist)
-	cf.update_value("fanart.tv-background", prefs.enable_fanart_bg)
 	cf.update_value("auto-update-playlists", prefs.always_auto_update_playlists)
 	cf.update_value("write-ratings-to-tag", prefs.write_ratings)
 	cf.update_value("enable-discord-rpc", prefs.discord_enable)
@@ -47168,7 +47019,6 @@ def load_prefs(bag: Bag) -> None:
 		"Enable automatic downloading of thumbnails in artist list")
 	prefs.enable_fanart_cover = cf.sync_add("bool", "fanart.tv-cover", prefs.enable_fanart_cover)
 	prefs.enable_fanart_artist = cf.sync_add("bool", "fanart.tv-artist", prefs.enable_fanart_artist)
-	prefs.enable_fanart_bg = cf.sync_add("bool", "fanart.tv-background", prefs.enable_fanart_bg)
 	prefs.always_auto_update_playlists = cf.sync_add(
 		"bool", "auto-update-playlists",
 		prefs.always_auto_update_playlists,
@@ -50047,8 +49897,6 @@ def main(holder: Holder) -> None:
 				prefs.repeat_mode = save[120]
 			if len(save) > 121 and save[121] is not None:
 				prefs.art_bg_stronger = save[121]
-			if len(save) > 122 and save[122] is not None:
-				prefs.art_bg_always_blur = save[122]
 			if len(save) > 123 and save[123] is not None:
 				prefs.failed_artists = save[123]
 			if len(save) > 124 and save[124] is not None:
@@ -50109,10 +49957,6 @@ def main(holder: Holder) -> None:
 				prefs.artist_list_sort_mode = save[156]
 			if len(save) > 157 and save[157] is not None:
 				prefs.phazor_device_selected = save[157]
-			if len(save) > 158 and save[158] is not None:
-				prefs.failed_background_artists = save[158]
-			if len(save) > 159 and save[159] is not None:
-				prefs.bg_flips = save[159]
 			if len(save) > 160 and save[160] is not None:
 				prefs.tray_show_title = save[160]
 			if len(save) > 161 and save[161] is not None:
