@@ -36260,15 +36260,20 @@ class StandardPlaylist:
 		ddt.alpha_bg = False
 
 	def _blit_tracklist(self) -> None:
-		"""Copy the tracklist texture to the main texture. In the preset path the
-		whole texture is copied; with a clip rect (Custom Layout) only that segment
-		is copied so the tracklist can't draw past its region."""
+		"""Copy the tracklist texture to the main texture, constrained to the
+		tracklist's region (the widget rect in Custom Layout, the playlist
+		viewport in the preset path) so partially scrolled rows can't draw
+		over — or show through — the surrounding panels."""
+		gui = self.gui
 		if self._clip_rect is not None:
 			cx, cy, cw, ch = self._clip_rect
-			r = sdl3.SDL_FRect(cx, cy, cw, ch)
-			sdl3.SDL_RenderTexture(self.renderer, self.gui.tracklist_texture, r, r)
 		else:
-			sdl3.SDL_RenderTexture(self.renderer, self.gui.tracklist_texture, None, self.gui.tracklist_texture_rect)
+			cx = gui.playlist_left
+			cy = gui.panelY
+			cw = gui.plw
+			ch = self.window_size[1] - gui.panelY - gui.panelBY
+		r = sdl3.SDL_FRect(round(cx), round(cy), round(cw), round(ch))
+		sdl3.SDL_RenderTexture(self.renderer, self.gui.tracklist_texture, r, r)
 
 	def cache_render(self) -> None:
 		self.update_album_rating_hover()
@@ -52092,6 +52097,12 @@ def main(holder: Holder) -> None:
 				ddt.rect([gui.playlist_left, gui.panelY, x - gui.playlist_left, h], colours.gallery_background)
 			ddt.rect(rect, colours.gallery_background)
 
+			# Tiles at the scroll edges render partially outside the gallery
+			# area; clip so they can't draw over (or show through) the panels
+			# above and below. Reset in the finally below.
+			gallery_clip = sdl3.SDL_Rect(round(x), round(gui.panelY), round(w), round(h))
+			sdl3.SDL_SetRenderClipRect(tauon.renderer, ctypes.byref(gallery_clip))
+
 			# ddt.rect_r(rect, [255, 0, 0, 200], True)
 
 			area_x = w + 38 * gui.scale
@@ -53163,6 +53174,8 @@ def main(holder: Holder) -> None:
 			)
 		except Exception:
 			logging.exception("Gallery render error!")
+		finally:
+			sdl3.SDL_SetRenderClipRect(tauon.renderer, None)
 		# END POWER BAR ------------------------
 
 	tauon.gallery_render = render_gallery  # exposed for the Custom Layout Album Gallery widget
