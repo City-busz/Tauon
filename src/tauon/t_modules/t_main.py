@@ -173,6 +173,7 @@ from tauon.t_modules.t_extra import (  # noqa: E402
 	get_year_from_string,
 	grow_rect,
 	hls_hue_mix,
+	hls_pull_contrast,
 	hls_to_rgb,
 	hms_to_seconds,
 	hsl_to_rgb,
@@ -23774,15 +23775,31 @@ class StyleOverlay:
 		r, g, b = sample.getpixel((int(fx * (w - 1)), int(fy * (h - 1))))[:3]
 		return ColourRGBA(r, g, b, 255)
 
-	def tint_from_background(self, colour: ColourRGBA, x: float, y: float, amount: float = 0.15) -> ColourRGBA:
+	def tint_from_background(
+		self, colour: ColourRGBA, x: float, y: float, amount: float = 0.15,
+		panel: ColourRGBA | None = None,
+	) -> ColourRGBA:
 		"""Mix a little of the background art's local hue/saturation into
 		colour (keeping its lightness and alpha), so grey furniture doesn't
 		clash with a coloured backdrop. Passes colour through unchanged when
-		no art background is showing."""
+		no art background is showing.
+
+		If `panel` (the translucent panel fill the element sits on) is given,
+		at high art strength the colour's lightness is also pushed away from
+		the effective backdrop — the panel blended over the local art — so
+		buttons can't land at the same lightness as the art behind them."""
 		sample = self.sample_background(x, y)
 		if sample is None:
 			return colour
-		return hls_hue_mix(colour, sample, amount)
+		colour = hls_hue_mix(colour, sample, amount)
+		if panel is not None and self.prefs.art_bg_stronger >= 3:
+			f = panel.a / 255
+			backdrop = ColourRGBA(
+				round(panel.r * f + sample.r * (1 - f)),
+				round(panel.g * f + sample.g * (1 - f)),
+				round(panel.b * f + sample.b * (1 - f)), 255)
+			colour = hls_pull_contrast(colour, backdrop)
+		return colour
 
 	def display(self, background: bool = False) -> None:
 		if background:
@@ -31382,7 +31399,8 @@ class TopPanel:
 			if self.coll(rect):
 				colour = colours.corner_button_active
 		colour = self.tauon.style_overlay.tint_from_background(
-			colour, wwx + 60 * gui.scale, yy + 16 * gui.scale, 0.2)
+			colour, wwx + 60 * gui.scale, yy + 16 * gui.scale, 0.2,
+			colours.bottom_panel_colour)
 
 		if not prefs.shuffle_lock and not gui.custom_mode:
 			# The panel button hides in custom mode (the layout/edit button below
@@ -31407,7 +31425,8 @@ class TopPanel:
 				self.tauon.layout_menu.activate(position=(lrect[0], lrect[1] + lrect[3]))
 			lcol = colours.corner_button_active if self.tauon.layout_menu.active else colours.corner_button
 			lcol = self.tauon.style_overlay.tint_from_background(
-				lcol, wwx + 20 * gui.scale, yy + 16 * gui.scale, 0.2)
+				lcol, wwx + 20 * gui.scale, yy + 16 * gui.scale, 0.2,
+				colours.bottom_panel_colour)
 			gw = round(18 * gui.scale)
 			gh = round(13 * gui.scale)
 			draw_layout_glyph(
@@ -31964,7 +31983,8 @@ class TopPanel:
 			bg = colours.status_text_over
 		else:
 			bg = colours.status_text_normal
-		bg = tauon.style_overlay.tint_from_background(bg, x, y + 8 * gui.scale, 0.2)
+		bg = tauon.style_overlay.tint_from_background(
+			bg, x, y + 8 * gui.scale, 0.2, colours.top_panel_background)
 		ddt.text((x, y), word, bg, 212)
 
 		if hit and inp.mouse_click:
@@ -32300,12 +32320,13 @@ class BottomBarType1:
 			self.volume_bar_position[0] + self.volume_bar_size[0] / 2,
 			self.volume_bar_position[1] + self.volume_bar_size[1] / 2)
 		buttons_y = window_size[1] - self.control_line_bottom
-		mb_off = so.tint_from_background(colours.media_buttons_off, 150 * gui.scale, buttons_y, 0.2)
-		mb_active = so.tint_from_background(colours.media_buttons_active, 150 * gui.scale, buttons_y, 0.2)
-		mb_over = so.tint_from_background(colours.media_buttons_over, 150 * gui.scale, buttons_y, 0.2)
-		md_off = so.tint_from_background(colours.mode_button_off, window_size[0] - 120 * gui.scale, buttons_y, 0.2)
-		md_active = so.tint_from_background(colours.mode_button_active, window_size[0] - 120 * gui.scale, buttons_y, 0.2)
-		md_over = so.tint_from_background(colours.mode_button_over, window_size[0] - 120 * gui.scale, buttons_y, 0.2)
+		panel_bg = colours.bottom_panel_colour
+		mb_off = so.tint_from_background(colours.media_buttons_off, 150 * gui.scale, buttons_y, 0.2, panel_bg)
+		mb_active = so.tint_from_background(colours.media_buttons_active, 150 * gui.scale, buttons_y, 0.2, panel_bg)
+		mb_over = so.tint_from_background(colours.media_buttons_over, 150 * gui.scale, buttons_y, 0.2, panel_bg)
+		md_off = so.tint_from_background(colours.mode_button_off, window_size[0] - 120 * gui.scale, buttons_y, 0.2, panel_bg)
+		md_active = so.tint_from_background(colours.mode_button_active, window_size[0] - 120 * gui.scale, buttons_y, 0.2, panel_bg)
+		md_over = so.tint_from_background(colours.mode_button_over, window_size[0] - 120 * gui.scale, buttons_y, 0.2, panel_bg)
 
 		ddt.rect_a(self.seek_bar_position, self.seek_bar_size, seek_bg)
 
