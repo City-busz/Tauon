@@ -608,6 +608,11 @@ class GuiVar:
 		self.spec_level_tex = sdl3.SDL_CreateTexture(
 			self.bag.renderer, sdl3.SDL_PIXELFORMAT_ARGB8888, sdl3.SDL_TEXTUREACCESS_TARGET, self.level_ww, self.level_hh)
 		sdl3.SDL_SetTextureBlendMode(self.spec4_tex, sdl3.SDL_BLENDMODE_BLEND)
+		# Blend so a translucent vis_bg (frosted art background) lets the
+		# panel and art beneath show through
+		sdl3.SDL_SetTextureBlendMode(self.spec1_tex, sdl3.SDL_BLENDMODE_BLEND)
+		sdl3.SDL_SetTextureBlendMode(self.spec2_tex, sdl3.SDL_BLENDMODE_BLEND)
+		sdl3.SDL_SetTextureBlendMode(self.spec_level_tex, sdl3.SDL_BLENDMODE_BLEND)
 		self.artist_panel_height = 320 * self.scale
 		self.last_artist_panel_height = self.artist_panel_height
 
@@ -14478,6 +14483,10 @@ class Tauon:
 			colours.playlist_panel_background.a = min(255, panel_alpha + 20)
 		for colour in element_colours:
 			colour.a = element_alpha
+
+		# The frosted looks let the art show through the visualizer backing
+		# too (the vis fills draw with replace-blend so this doesn't stack)
+		colours.vis_bg.a = element_alpha if prefs.art_bg_frosted else 255
 
 		# The window-transparency styles set their own panel alphas at theme
 		# (re)load; don't clobber them back to opaque here
@@ -58400,8 +58409,12 @@ def main(holder: Holder) -> None:
 					vis_update = False
 
 					sdl3.SDL_SetRenderTarget(renderer, gui.spec2_tex)
+					# Replace-blend: vis_bg may be translucent (frosted art
+					# bg) and old column pixels must not show through it
+					sdl3.SDL_SetRenderDrawBlendMode(renderer, sdl3.SDL_BLENDMODE_NONE)
 					for i, value in enumerate(gui.spec2_buffers[0]):
 						ddt.rect([gui.spec2_position, i, 1, 1], colours.vis_bg)
+					sdl3.SDL_SetRenderDrawBlendMode(renderer, sdl3.SDL_BLENDMODE_BLEND)
 
 					del gui.spec2_buffers[0]
 
@@ -58487,8 +58500,11 @@ def main(holder: Holder) -> None:
 				if not gui.test:
 					sdl3.SDL_SetRenderTarget(renderer, gui.spec1_tex)
 
-					# ddt.rect_r(gui.spec_rect, colours.top_panel_background, True)
+					# Replace-blend: vis_bg may be translucent (frosted art
+					# bg) and the texture persists between frames
+					sdl3.SDL_SetRenderDrawBlendMode(renderer, sdl3.SDL_BLENDMODE_NONE)
 					ddt.rect((0, 0, gui.spec_w, gui.spec_h), colours.vis_bg)
+					sdl3.SDL_SetRenderDrawBlendMode(renderer, sdl3.SDL_BLENDMODE_BLEND)
 
 					# xx = 0
 					gui.bar.x = 0
@@ -58553,7 +58569,14 @@ def main(holder: Holder) -> None:
 				y = 0
 
 				gui.spec_level_rec.x = round(x - 70 * gui.scale)
-				ddt.rect_a((0, 0), (79 * gui.scale, 18 * gui.scale), colours.grey(10))
+				# Frosted art bg: translucent backing (replace-blend, since
+				# the texture persists between frames)
+				level_bg = colours.grey(10)
+				if gui.have_art_bg and prefs.art_bg_frosted:
+					level_bg = ColourRGBA(10, 10, 10, 115)
+				sdl3.SDL_SetRenderDrawBlendMode(renderer, sdl3.SDL_BLENDMODE_NONE)
+				ddt.rect_a((0, 0), (79 * gui.scale, 18 * gui.scale), level_bg)
+				sdl3.SDL_SetRenderDrawBlendMode(renderer, sdl3.SDL_BLENDMODE_BLEND)
 
 				x = round(gui.level_ww - 9 * gui.scale)
 				y = 10 * gui.scale
